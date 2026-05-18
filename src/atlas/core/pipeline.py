@@ -19,6 +19,7 @@ from atlas.tiers.base import Tier
 from atlas.tiers.local_blocklist import LocalBlocklistTier
 from atlas.tiers.heuristics import HeuristicsTier
 from atlas.tiers.dnsbl import DNSBLTier
+from atlas.tiers.virustotal import VirusTotalTier
 
 
 logger = logging.getLogger(__name__)
@@ -79,7 +80,10 @@ class AnalysisPipeline:
         # Tier 3: DNSBL (Spamhaus + SURBL)
         self._tiers.append(DNSBLTier(self.config))
 
-        # Future tiers (URLhaus, PhishTank, TLS, VirusTotal, etc.)
+        # Tier 4: VirusTotal (expensive, runs last)
+        self._tiers.append(VirusTotalTier(self.config))
+
+        # Future tiers (URLhaus, PhishTank, TLS, etc.)
         # are registered here as you build them:
         # self._tiers.append(URLhausTier(self.config))
         # self._tiers.append(VirusTotalTier(self.config))
