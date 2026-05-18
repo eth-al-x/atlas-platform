@@ -1,0 +1,42 @@
+# ATLAS default configuration
+# Override values via environment variables (prefixed ATLAS_) or CLI flags
+
+analysis:
+  # Tier execution: stop analysis after a high-confidence flag
+  early_exit_on_high_risk: true
+
+  # Shannon entropy threshold for DGA detection (standard baseline: 3.8)
+  entropy_threshold: 3.8
+
+  # Domain age in hours below which a domain is flagged as suspicious
+  age_threshold_hours: 48
+
+  # VirusTotal danger score percentage at which a URL becomes "High Risk"
+  virustotal_danger_threshold: 10.0
+
+  # Maximum retries for rate-limited API calls
+  max_retries: 3
+  retry_wait_seconds: 60
+
+  # Request timeout in seconds
+  request_timeout: 10
+
+blocklist:
+  # StevenBlack hosts file URL
+  source_url: "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
+  cache_filename: "malicious_host_cache.txt"
+  # Re-download the cache if older than this many hours
+  max_cache_age_hours: 24
+
+dnsbl:
+  mirrors:
+    - "dbl.spamhaus.org"
+    - "multi.surbl.org"
+  timeout_seconds: 3.0
+
+storage:
+  database_path: "atlas.db"
+
+server:
+  host: "0.0.0.0"
+  port: 8000
