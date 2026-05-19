@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ATLAS runtime files
+atlas.db
+atlas.db-journal
+atlas.db-wal
+atlas.db-shm
+malicious_host_cache.txt
+*.log

@@ -20,6 +20,7 @@ from atlas.tiers.local_blocklist import LocalBlocklistTier
 from atlas.tiers.heuristics import HeuristicsTier
 from atlas.tiers.dnsbl import DNSBLTier
 from atlas.tiers.virustotal import VirusTotalTier
+from atlas.tiers.typosquat import TyposquatTier
 
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,9 @@ class AnalysisPipeline:
 
         # Tier 2: Heuristics (entropy + WHOIS)
         self._tiers.append(HeuristicsTier(self.config))
+
+        # Tier 2.5: Typosquat detection (local string matching)
+        self._tiers.append(TyposquatTier(self.config))
 
         # Tier 3: DNSBL (Spamhaus + SURBL)
         self._tiers.append(DNSBLTier(self.config))
