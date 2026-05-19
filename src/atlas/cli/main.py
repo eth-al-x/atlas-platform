@@ -241,6 +241,71 @@ def stats() -> None:
             console.print(f"  {d['domain']}  ({d['count']} hits, {d['final_verdict']})")
 
 
+# ── Recon subcommand group ────────────────────────────────────
+
+recon_app = typer.Typer(
+    name="recon",
+    help="Investigative recon tools (DNS, headers, WHOIS, etc.)",
+    no_args_is_help=True,
+)
+app.add_typer(recon_app, name="recon")
+
+
+def _print_recon_result(result, title: str) -> None:
+    """Render a recon result with a header and the structured data."""
+    from atlas.core.models import ReconResult
+
+    duration = result.data.get("_duration_ms", 0)
+    header = Text()
+    header.append(f"🔎 {title}\n", style="bold blue")
+    header.append(f"Domain: {result.domain}\n", style="dim")
+    header.append(f"Time:   {duration}ms", style="dim")
+    console.print(Panel(header, border_style="blue"))
+
+    if result.error:
+        console.print(f"[red]Error:[/red] {result.error}\n")
+        return
+
+    # Render DNS records specifically (other recon tools will get their own render)
+    if result.recon_type == "dns":
+        records = result.data.get("records", {})
+        table = Table(show_header=True, header_style="bold cyan", box=None)
+        table.add_column("Type", min_width=6)
+        table.add_column("Value")
+
+        for rtype, values in records.items():
+            if isinstance(values, dict) and "error" in values:
+                table.add_row(rtype, f"[yellow]({values['error']})[/yellow]")
+            elif isinstance(values, list) and values:
+                for v in values:
+                    table.add_row(rtype, v)
+            else:
+                table.add_row(rtype, "[dim]no records[/dim]")
+
+        console.print(table)
+        console.print()
+
+
+@recon_app.command("dns")
+def recon_dns(
+    domain: str = typer.Argument(..., help="Domain to look up"),
+) -> None:
+    """Resolve A, AAAA, MX, TXT, and NS records for a domain."""
+    logging.basicConfig(level=logging.WARNING)
+    for noisy in ("httpx", "httpcore", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    from atlas.core.domain import extract_domain
+    from atlas.recon.dns import DNSReconTool
+
+    # Normalize input — accept full URLs too
+    clean_domain = extract_domain(domain) if "/" in domain else domain.lower().strip()
+
+    tool = DNSReconTool(get_config())
+    result = tool.run(clean_domain)
+    _print_recon_result(result, "DNS Lookup")
+
+
 # ── Entry point ───────────────────────────────────────────────
 
 if __name__ == "__main__":
