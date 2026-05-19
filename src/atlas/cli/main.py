@@ -253,8 +253,6 @@ app.add_typer(recon_app, name="recon")
 
 def _print_recon_result(result, title: str) -> None:
     """Render a recon result with a header and the structured data."""
-    from atlas.core.models import ReconResult
-
     duration = result.data.get("_duration_ms", 0)
     header = Text()
     header.append(f"🔎 {title}\n", style="bold blue")
@@ -266,24 +264,109 @@ def _print_recon_result(result, title: str) -> None:
         console.print(f"[red]Error:[/red] {result.error}\n")
         return
 
-    # Render DNS records specifically (other recon tools will get their own render)
-    if result.recon_type == "dns":
-        records = result.data.get("records", {})
-        table = Table(show_header=True, header_style="bold cyan", box=None)
-        table.add_column("Type", min_width=6)
-        table.add_column("Value")
+    # Dispatch to a per-type renderer
+    renderers = {
+        "dns": _render_dns,
+        "http_headers": _render_http_headers,
+        "web_recon": _render_web_recon,
+    }
+    renderer = renderers.get(result.recon_type)
+    if renderer:
+        renderer(result)
+    console.print()
 
-        for rtype, values in records.items():
-            if isinstance(values, dict) and "error" in values:
-                table.add_row(rtype, f"[yellow]({values['error']})[/yellow]")
-            elif isinstance(values, list) and values:
-                for v in values:
-                    table.add_row(rtype, v)
-            else:
-                table.add_row(rtype, "[dim]no records[/dim]")
 
-        console.print(table)
-        console.print()
+def _render_dns(result) -> None:
+    """Render DNS records as a clean two-column table."""
+    records = result.data.get("records", {})
+    table = Table(show_header=True, header_style="bold cyan", box=None)
+    table.add_column("Type", min_width=6)
+    table.add_column("Value")
+
+    for rtype, values in records.items():
+        if isinstance(values, dict) and "error" in values:
+            table.add_row(rtype, f"[yellow]({values['error']})[/yellow]")
+        elif isinstance(values, list) and values:
+            for v in values:
+                table.add_row(rtype, v)
+        else:
+            table.add_row(rtype, "[dim]no records[/dim]")
+
+    console.print(table)
+
+
+def _render_http_headers(result) -> None:
+    """Render HTTP header analysis — status, server, and security scoring."""
+    data = result.data
+    console.print(f"[bold]Status:[/bold] {data.get('status_code')}   "
+                  f"[bold]Server:[/bold] {data.get('server', 'unknown')}   "
+                  f"[bold]Redirects:[/bold] {data.get('redirects', 0)}")
+    console.print(f"[bold]Content-Type:[/bold] {data.get('content_type', 'unknown')}")
+
+    security = data.get("security", {})
+    rating = security.get("rating", "Unknown")
+    score = security.get("score", "—")
+    rating_color = {"Strong": "green", "Moderate": "yellow", "Weak": "red"}.get(rating, "white")
+
+    console.print(f"\n[bold]Security Header Score:[/bold] "
+                  f"[{rating_color}]{rating}[/{rating_color}] ({score})\n")
+
+    table = Table(show_header=True, header_style="bold cyan", box=None)
+    table.add_column("Header", min_width=28)
+    table.add_column("Status", min_width=10)
+    table.add_column("Description")
+
+    for header_name, info in security.get("headers", {}).items():
+        present = info.get("present", False)
+        status = "[green]✓ present[/green]" if present else "[red]✗ missing[/red]"
+        table.add_row(header_name, status, info.get("description", ""))
+
+    console.print(table)
+
+
+def _render_web_recon(result) -> None:
+    """Render web recon — title, links, forms, scripts, suspicious JS markers."""
+    data = result.data
+
+    if data.get("note"):
+        console.print(f"[yellow]{data['note']}[/yellow]")
+        return
+
+    console.print(f"[bold]Title:[/bold]       {data.get('title') or '[dim](none)[/dim]'}")
+    console.print(f"[bold]Description:[/bold] {data.get('description') or '[dim](none)[/dim]'}")
+    if data.get("keywords"):
+        console.print(f"[bold]Keywords:[/bold]    {data['keywords']}")
+    console.print(f"[bold]Page size:[/bold]   {data.get('page_size_bytes', 0):,} bytes")
+
+    # Forms — phishing pages often hinge on these
+    forms = data.get("forms", {})
+    console.print(f"\n[bold]Forms:[/bold] {forms.get('count', 0)}")
+    for f in forms.get("actions", [])[:5]:
+        console.print(f"  → {f['method'].upper()} {f['action']}")
+
+    # Scripts
+    scripts = data.get("scripts", {})
+    console.print(f"\n[bold]Scripts:[/bold] {scripts.get('inline_count', 0)} inline, "
+                  f"{scripts.get('external_count', 0)} external")
+
+    # Suspicious JS — only highlight if there's anything notable
+    suspicious = data.get("suspicious_js", {})
+    if suspicious.get("total_matches", 0) > 0:
+        color = "red" if suspicious.get("high_volume") else "yellow"
+        console.print(f"\n[bold {color}]Suspicious JS markers: "
+                      f"{suspicious['total_matches']} total[/bold {color}]")
+        for pattern, count in suspicious.get("patterns", {}).items():
+            if count > 0:
+                console.print(f"  • {pattern}: {count}")
+
+    # External links — top 5
+    links = data.get("external_links", [])
+    if links:
+        console.print(f"\n[bold]External links:[/bold] {len(links)} total")
+        for link in links[:5]:
+            console.print(f"  • {link}")
+        if len(links) > 5:
+            console.print(f"  [dim](+{len(links) - 5} more)[/dim]")
 
 
 @recon_app.command("dns")
@@ -304,6 +387,38 @@ def recon_dns(
     tool = DNSReconTool(get_config())
     result = tool.run(clean_domain)
     _print_recon_result(result, "DNS Lookup")
+
+
+@recon_app.command("headers")
+def recon_headers(
+    url: str = typer.Argument(..., help="URL to inspect (e.g. https://example.com)"),
+) -> None:
+    """Fetch and analyze HTTP response headers, including security headers."""
+    logging.basicConfig(level=logging.WARNING)
+    for noisy in ("httpx", "httpcore", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    from atlas.recon.http_headers import HTTPHeadersReconTool
+
+    tool = HTTPHeadersReconTool(get_config())
+    result = tool.run(url)
+    _print_recon_result(result, "HTTP Headers")
+
+
+@recon_app.command("web")
+def recon_web(
+    url: str = typer.Argument(..., help="URL to scrape (e.g. https://example.com)"),
+) -> None:
+    """Fetch a page and extract title, meta, links, forms, scripts, and suspicious JS."""
+    logging.basicConfig(level=logging.WARNING)
+    for noisy in ("httpx", "httpcore", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    from atlas.recon.web_recon import WebReconTool
+
+    tool = WebReconTool(get_config())
+    result = tool.run(url)
+    _print_recon_result(result, "Web Recon")
 
 
 # ── Entry point ───────────────────────────────────────────────
