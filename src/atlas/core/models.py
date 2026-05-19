@@ -6,7 +6,7 @@ Every tier, recon tool, and interface shares these structures.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
@@ -64,7 +64,7 @@ class ScanReport(BaseModel):
     domain: str
     final_verdict: Verdict = Verdict.CLEAN
     tier_results: list[TierResult] = Field(default_factory=list)
-    scanned_at: datetime = Field(default_factory=datetime.utcnow)
+    scanned_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     scan_duration_ms: int = 0
     source: ScanSource = ScanSource.CLI
 
@@ -86,7 +86,7 @@ class ReconResult(BaseModel):
     domain: str
     data: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
-    performed_at: datetime = Field(default_factory=datetime.utcnow)
+    performed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ── Statistics ───────────────────────────────────────────────
