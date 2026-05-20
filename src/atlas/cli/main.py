@@ -269,6 +269,8 @@ def _print_recon_result(result, title: str) -> None:
         "dns": _render_dns,
         "http_headers": _render_http_headers,
         "web_recon": _render_web_recon,
+        "whois": _render_whois,
+        "ip_intel": _render_ip_intel,
     }
     renderer = renderers.get(result.recon_type)
     if renderer:
@@ -419,6 +421,203 @@ def recon_web(
     tool = WebReconTool(get_config())
     result = tool.run(url)
     _print_recon_result(result, "Web Recon")
+
+
+@recon_app.command("whois")
+def recon_whois(
+    domain: str = typer.Argument(..., help="Domain to look up WHOIS for"),
+) -> None:
+    """Fetch domain registration details — registrar, dates, name servers."""
+    logging.basicConfig(level=logging.WARNING)
+    for noisy in ("httpx", "httpcore", "urllib3", "whois"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    from atlas.core.domain import extract_domain
+    from atlas.recon.whois_lookup import WhoisReconTool
+
+    clean_domain = extract_domain(domain) if "/" in domain else domain.lower().strip()
+    tool = WhoisReconTool(get_config())
+    result = tool.run(clean_domain)
+    _print_recon_result(result, "WHOIS")
+
+
+@recon_app.command("ip")
+def recon_ip(
+    domain: str = typer.Argument(..., help="Domain to resolve and look up"),
+) -> None:
+    """Resolve a domain to an IP and query free reputation sources."""
+    logging.basicConfig(level=logging.WARNING)
+    for noisy in ("httpx", "httpcore", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    from atlas.core.domain import extract_domain
+    from atlas.recon.ip_intel import IPIntelReconTool
+
+    clean_domain = extract_domain(domain) if "/" in domain else domain.lower().strip()
+    tool = IPIntelReconTool(get_config())
+    result = tool.run(clean_domain)
+    _print_recon_result(result, "IP Intelligence")
+
+
+# ── Renderers for WHOIS and IP Intel ──────────────────────────
+
+
+def _render_whois(result) -> None:
+    """Render WHOIS data — registrar, dates, status, name servers."""
+    data = result.data
+    status = data.get("status", "unknown")
+    status_color = {
+        "active": "green",
+        "expiring soon": "yellow",
+        "expired": "red",
+        "unknown": "dim",
+    }.get(status, "white")
+
+    console.print(f"[bold]Registrar:[/bold]      {data.get('registrar') or '[dim](unknown)[/dim]'}")
+    if data.get("registrant_org"):
+        console.print(f"[bold]Registrant:[/bold]     {data['registrant_org']}")
+    if data.get("country"):
+        console.print(f"[bold]Country:[/bold]        {data['country']}")
+
+    console.print(f"\n[bold]Status:[/bold]         [{status_color}]{status}[/{status_color}]")
+
+    if data.get("age_years") is not None:
+        console.print(f"[bold]Age:[/bold]            {data['age_years']} years "
+                      f"({data['age_days']} days)")
+
+    if data.get("creation_date"):
+        console.print(f"[bold]Created:[/bold]        {data['creation_date'][:10]}")
+    if data.get("expiration_date"):
+        console.print(f"[bold]Expires:[/bold]        {data['expiration_date'][:10]} "
+                      f"(in {data.get('expires_in_days', '?')} days)")
+    if data.get("updated_date"):
+        console.print(f"[bold]Last updated:[/bold]   {data['updated_date'][:10]}")
+
+    name_servers = data.get("name_servers", [])
+    if name_servers:
+        console.print(f"\n[bold]Name servers:[/bold]")
+        for ns in name_servers:
+            console.print(f"  • {ns}")
+
+
+def _render_ip_intel(result) -> None:
+    """Render IP intelligence — geolocation, ASN, ports, vulnerabilities."""
+    data = result.data
+    console.print(f"[bold]IP address:[/bold] {data.get('ip', 'unknown')}")
+
+    geo = data.get("geolocation", {})
+    if geo.get("error"):
+        console.print(f"\n[yellow]Geolocation error: {geo['error']}[/yellow]")
+    else:
+        console.print(f"\n[bold cyan]Geolocation[/bold cyan]")
+        location_parts = [geo.get("city"), geo.get("region"), geo.get("country")]
+        location = ", ".join(p for p in location_parts if p) or "unknown"
+        console.print(f"  Location: {location}")
+        if geo.get("isp"):
+            console.print(f"  ISP:      {geo['isp']}")
+        if geo.get("organization"):
+            console.print(f"  Org:      {geo['organization']}")
+        if geo.get("asn"):
+            console.print(f"  ASN:      {geo['asn']}")
+        if geo.get("timezone"):
+            console.print(f"  Timezone: {geo['timezone']}")
+
+    exposure = data.get("exposure", {})
+    if exposure.get("error"):
+        console.print(f"\n[yellow]Exposure check error: {exposure['error']}[/yellow]")
+    elif exposure.get("note"):
+        console.print(f"\n[dim]{exposure['note']}[/dim]")
+    else:
+        console.print(f"\n[bold cyan]Exposure (Shodan InternetDB)[/bold cyan]")
+        ports = exposure.get("open_ports", [])
+        if ports:
+            console.print(f"  Open ports:   {', '.join(str(p) for p in ports)}")
+        else:
+            console.print(f"  Open ports:   none reported")
+
+        tags = exposure.get("tags", [])
+        if tags:
+            console.print(f"  Tags:         {', '.join(tags)}")
+
+        vulns = exposure.get("vulnerabilities", [])
+        if vulns:
+            vuln_color = "red" if len(vulns) > 5 else "yellow"
+            console.print(f"  [{vuln_color}]Vulnerabilities: {len(vulns)} CVEs[/{vuln_color}]")
+            # Show the first 5 CVE IDs
+            for cve in vulns[:5]:
+                console.print(f"    • {cve}")
+            if len(vulns) > 5:
+                console.print(f"    [dim](+{len(vulns) - 5} more)[/dim]")
+        else:
+            console.print(f"  Vulnerabilities: none reported")
+
+        cpes = exposure.get("cpes", [])
+        if cpes:
+            console.print(f"  Software:     {len(cpes)} components identified")
+
+
+# ── Unified investigate command ───────────────────────────────
+
+
+@app.command()
+def investigate(
+    target: str = typer.Argument(..., help="Domain or URL to investigate"),
+    skip_scan: bool = typer.Option(False, "--skip-scan", help="Skip the threat verdict pipeline"),
+) -> None:
+    """
+    Run all recon tools plus the threat analysis pipeline on a target.
+
+    This is the flagship command for investigating a suspicious domain:
+    one input, full output across DNS, WHOIS, IP intel, HTTP headers,
+    web content, and the tiered threat verdict.
+    """
+    logging.basicConfig(level=logging.WARNING)
+    for noisy in ("httpx", "httpcore", "urllib3", "whois"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    from atlas.core.domain import extract_domain, normalize_url
+    from atlas.recon.dns import DNSReconTool
+    from atlas.recon.http_headers import HTTPHeadersReconTool
+    from atlas.recon.ip_intel import IPIntelReconTool
+    from atlas.recon.web_recon import WebReconTool
+    from atlas.recon.whois_lookup import WhoisReconTool
+
+    config = get_config()
+    clean_domain = extract_domain(target) if "/" in target else target.lower().strip()
+    full_url = normalize_url(target if "/" in target else clean_domain)
+
+    # Header for the whole investigation
+    console.print()
+    console.print(Panel(
+        Text(f"🔬 Investigating: {clean_domain}", style="bold blue"),
+        border_style="blue",
+    ))
+    console.print()
+
+    # ── Threat verdict (unless skipped) ──────────────────────
+    if not skip_scan:
+        console.print("[bold cyan]━━━ Threat Analysis ━━━[/bold cyan]\n")
+        pipeline = _get_pipeline()
+        repo = _get_repo()
+        request = ScanRequest(url=full_url, source=ScanSource.CLI)
+        report = pipeline.analyze(request)
+        scan_id = repo.save_scan(report)
+        report.id = scan_id
+        _print_report(report)
+
+    # ── Recon tools in sequence ──────────────────────────────
+    tools = [
+        ("━━━ DNS Records ━━━", DNSReconTool(config), clean_domain, "DNS Lookup"),
+        ("━━━ WHOIS ━━━", WhoisReconTool(config), clean_domain, "WHOIS"),
+        ("━━━ IP Intelligence ━━━", IPIntelReconTool(config), clean_domain, "IP Intelligence"),
+        ("━━━ HTTP Headers ━━━", HTTPHeadersReconTool(config), full_url, "HTTP Headers"),
+        ("━━━ Web Content ━━━", WebReconTool(config), full_url, "Web Recon"),
+    ]
+
+    for section_header, tool, target_input, render_title in tools:
+        console.print(f"\n[bold cyan]{section_header}[/bold cyan]\n")
+        result = tool.run(target_input)
+        _print_recon_result(result, render_title)
 
 
 # ── Entry point ───────────────────────────────────────────────
