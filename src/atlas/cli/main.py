@@ -272,6 +272,7 @@ def _print_recon_result(result, title: str) -> None:
         "whois": _render_whois,
         "ip_intel": _render_ip_intel,
         "crtsh": _render_crtsh,
+        "urlscan": _render_urlscan,
     }
     renderer = renderers.get(result.recon_type)
     if renderer:
@@ -478,6 +479,38 @@ def recon_crtsh(
     _print_recon_result(result, "Certificate Transparency (crt.sh)")
 
 
+@recon_app.command("urlscan")
+def recon_urlscan(
+    url: str = typer.Argument(..., help="URL to scan in urlscan.io's sandbox browser"),
+) -> None:
+    """Submit a URL to urlscan.io for sandboxed browser analysis (~20-30 sec)."""
+    logging.basicConfig(level=logging.WARNING)
+    for noisy in ("httpx", "httpcore", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    from rich.progress import Progress, SpinnerColumn, TextColumn
+
+    from atlas.recon.urlscan import URLScanReconTool
+
+    tool = URLScanReconTool(get_config())
+
+    # Show a progress spinner during the synchronous submit + poll cycle.
+    # transient=True clears the spinner from the terminal after completion.
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        transient=True,
+        console=console,
+    ) as progress:
+        progress.add_task(
+            description=f"Submitting {url} to urlscan.io and waiting for results...",
+            total=None,
+        )
+        result = tool.run(url)
+
+    _print_recon_result(result, "urlscan.io (Sandbox Browser Analysis)")
+
+
 # ── Renderers for WHOIS and IP Intel ──────────────────────────
 
 
@@ -622,6 +655,82 @@ def _render_crtsh(result) -> None:
             console.print(f"  • {w}")
 
 
+def _render_urlscan(result) -> None:
+    """Render urlscan.io results — verdict, screenshot link, contacted infrastructure."""
+    data = result.data
+
+    # If the scan was submitted but didn't complete, show what we have
+    if data.get("note"):
+        console.print(f"[yellow]{data['note']}[/yellow]")
+        if data.get("report_url"):
+            console.print(f"[bold]Report URL:[/bold] {data['report_url']}")
+            console.print("[dim](results may be available there in a few moments)[/dim]")
+        return
+
+    # Headline verdict
+    malicious = data.get("malicious", False)
+    score = data.get("score", 0)
+    tags = data.get("tags", [])
+
+    if malicious:
+        console.print(f"[bold red]urlscan verdict: MALICIOUS[/bold red]   "
+                      f"Score: [red]{score}[/red]")
+    elif score > 0:
+        console.print(f"[bold yellow]urlscan verdict: Suspicious[/bold yellow]   "
+                      f"Score: [yellow]{score}[/yellow]")
+    else:
+        console.print(f"[bold green]urlscan verdict: Clean[/bold green]   Score: 0")
+
+    if tags:
+        console.print(f"[bold]Tags:[/bold] {', '.join(tags)}")
+
+    # Links to the urlscan report and screenshot
+    console.print()
+    if data.get("report_url"):
+        console.print(f"[bold]Report:[/bold]     {data['report_url']}")
+    if data.get("screenshot_url"):
+        console.print(f"[bold]Screenshot:[/bold] {data['screenshot_url']}")
+    if data.get("scanned_url"):
+        console.print(f"[bold]Final URL:[/bold]  {data['scanned_url']}")
+
+    # Where the page actually loaded from
+    page = data.get("page", {})
+    if page.get("ip") or page.get("country"):
+        console.print(f"\n[bold cyan]Page loaded from[/bold cyan]")
+        if page.get("ip"):
+            console.print(f"  IP:       {page['ip']}")
+        if page.get("country"):
+            console.print(f"  Country:  {page['country']}")
+        if page.get("server"):
+            console.print(f"  Server:   {page['server']}")
+        if page.get("umbrella_rank") is not None:
+            rank = page["umbrella_rank"]
+            note = " (very popular)" if rank < 10000 else ""
+            console.print(f"  Popularity rank: {rank:,}{note}")
+
+    # Behavioral stats from the sandbox
+    stats = data.get("stats", {})
+    if stats.get("total_requests"):
+        console.print(f"\n[bold cyan]Sandbox behavior[/bold cyan]")
+        console.print(f"  Total network requests:   {stats.get('total_requests', 0)}")
+        console.print(f"  Unique IPs contacted:     {stats.get('unique_ips', 0)}")
+        console.print(f"  Unique domains:           {stats.get('unique_domains', 0)}")
+        console.print(f"  Unique countries:         {stats.get('unique_countries', 0)}")
+
+        mal_reqs = stats.get("malicious_requests", 0)
+        if mal_reqs > 0:
+            console.print(f"  [red]Malicious requests:       {mal_reqs}[/red]")
+
+    # Show top contacted domains — useful for IoC extraction
+    domains = data.get("contacted_domains", [])
+    if domains:
+        console.print(f"\n[bold]Contacted domains ({len(domains)}):[/bold]")
+        for d in domains[:10]:
+            console.print(f"  • {d}")
+        if len(domains) > 10:
+            console.print(f"  [dim](+{len(domains) - 10} more)[/dim]")
+
+
 # ── Unified investigate command ───────────────────────────────
 
 
@@ -629,23 +738,29 @@ def _render_crtsh(result) -> None:
 def investigate(
     target: str = typer.Argument(..., help="Domain or URL to investigate"),
     skip_scan: bool = typer.Option(False, "--skip-scan", help="Skip the threat verdict pipeline"),
+    skip_slow: bool = typer.Option(False, "--skip-slow",
+                                   help="Skip slow tools (urlscan.io adds ~30s)"),
 ) -> None:
     """
     Run all recon tools plus the threat analysis pipeline on a target.
 
     This is the flagship command for investigating a suspicious domain:
-    one input, full output across DNS, WHOIS, IP intel, HTTP headers,
-    web content, and the tiered threat verdict.
+    one input, full output across DNS, WHOIS, IP intel, CT logs, HTTP
+    headers, web content, urlscan sandbox analysis, and the tiered
+    threat verdict.
     """
     logging.basicConfig(level=logging.WARNING)
     for noisy in ("httpx", "httpcore", "urllib3", "whois"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    from rich.progress import Progress, SpinnerColumn, TextColumn
 
     from atlas.core.domain import extract_domain, normalize_url
     from atlas.recon.crtsh import CrtShReconTool
     from atlas.recon.dns import DNSReconTool
     from atlas.recon.http_headers import HTTPHeadersReconTool
     from atlas.recon.ip_intel import IPIntelReconTool
+    from atlas.recon.urlscan import URLScanReconTool
     from atlas.recon.web_recon import WebReconTool
     from atlas.recon.whois_lookup import WhoisReconTool
 
@@ -674,18 +789,41 @@ def investigate(
 
     # ── Recon tools in sequence ──────────────────────────────
     tools = [
-        ("━━━ DNS Records ━━━", DNSReconTool(config), clean_domain, "DNS Lookup"),
-        ("━━━ WHOIS ━━━", WhoisReconTool(config), clean_domain, "WHOIS"),
-        ("━━━ IP Intelligence ━━━", IPIntelReconTool(config), clean_domain, "IP Intelligence"),
+        ("━━━ DNS Records ━━━", DNSReconTool(config), clean_domain, "DNS Lookup", False),
+        ("━━━ WHOIS ━━━", WhoisReconTool(config), clean_domain, "WHOIS", False),
+        ("━━━ IP Intelligence ━━━", IPIntelReconTool(config), clean_domain,
+         "IP Intelligence", False),
         ("━━━ Certificate Transparency ━━━", CrtShReconTool(config), clean_domain,
-         "Certificate Transparency (crt.sh)"),
-        ("━━━ HTTP Headers ━━━", HTTPHeadersReconTool(config), full_url, "HTTP Headers"),
-        ("━━━ Web Content ━━━", WebReconTool(config), full_url, "Web Recon"),
+         "Certificate Transparency (crt.sh)", False),
+        ("━━━ HTTP Headers ━━━", HTTPHeadersReconTool(config), full_url,
+         "HTTP Headers", False),
+        ("━━━ Web Content ━━━", WebReconTool(config), full_url, "Web Recon", False),
+        ("━━━ urlscan.io Sandbox ━━━", URLScanReconTool(config), full_url,
+         "urlscan.io (Sandbox Browser Analysis)", True),  # True = slow
     ]
 
-    for section_header, tool, target_input, render_title in tools:
+    for section_header, tool, target_input, render_title, is_slow in tools:
+        if is_slow and skip_slow:
+            continue
+
         console.print(f"\n[bold cyan]{section_header}[/bold cyan]\n")
-        result = tool.run(target_input)
+
+        # Wrap slow tools in a progress spinner
+        if is_slow:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                transient=True,
+                console=console,
+            ) as progress:
+                progress.add_task(
+                    description=f"Running {tool.display_name} (this can take ~30s)...",
+                    total=None,
+                )
+                result = tool.run(target_input)
+        else:
+            result = tool.run(target_input)
+
         _print_recon_result(result, render_title)
 
 
