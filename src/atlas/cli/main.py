@@ -273,6 +273,7 @@ def _print_recon_result(result, title: str) -> None:
         "ip_intel": _render_ip_intel,
         "crtsh": _render_crtsh,
         "urlscan": _render_urlscan,
+        "subdomains": _render_subdomains,
     }
     renderer = renderers.get(result.recon_type)
     if renderer:
@@ -511,6 +512,95 @@ def recon_urlscan(
     _print_recon_result(result, "urlscan.io (Sandbox Browser Analysis)")
 
 
+@recon_app.command("subdomains")
+def recon_subdomains(
+    domain: str = typer.Argument(..., help="Domain to enumerate subdomains for"),
+    wordlist: str = typer.Option(None, "--wordlist", "-w",
+                                 help="Path to custom wordlist (default: built-in ~700 entries)"),
+) -> None:
+    """Brute-force discover subdomains via concurrent DNS resolution against a wordlist."""
+    logging.basicConfig(level=logging.WARNING)
+    for noisy in ("httpx", "httpcore", "urllib3", "dns"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    from atlas.core.domain import extract_domain
+    from atlas.recon.subdomains import (
+        SubdomainReconTool,
+        ensure_acknowledged,
+        mark_acknowledged,
+    )
+    from rich.progress import Progress, SpinnerColumn, TextColumn
+
+    # One-time warning before any active recon happens
+    if not ensure_acknowledged():
+        console.print()
+        console.print(Panel(
+            Text(
+                "⚠  Active Recon Notice\n\n"
+                "Subdomain enumeration generates real DNS queries against\n"
+                "public infrastructure. Running this against domains you don't\n"
+                "own or have permission to test may violate terms of service\n"
+                "or local laws. Use responsibly.\n\n"
+                "This warning will only be shown once.",
+                style="bold yellow",
+            ),
+            border_style="yellow",
+        ))
+        if not typer.confirm("\nProceed?", default=True):
+            console.print("[dim]Aborted.[/dim]")
+            raise typer.Exit(0)
+        mark_acknowledged()
+        console.print()
+
+    clean_domain = extract_domain(domain) if "/" in domain else domain.lower().strip()
+    tool = SubdomainReconTool(get_config())
+
+    context = {}
+    if wordlist:
+        context["wordlist_path"] = wordlist
+
+    # Spinner during the (potentially 10-30s) enumeration run
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        transient=True,
+        console=console,
+    ) as progress:
+        progress.add_task(
+            description=f"Enumerating subdomains for {clean_domain}...",
+            total=None,
+        )
+        result = tool.run(clean_domain, **context)
+
+    _print_recon_result(result, "Subdomain Enumeration")
+
+
+def _render_subdomains(result) -> None:
+    """Render subdomain enumeration results — count, hostnames, IPs."""
+    data = result.data
+    discovered = data.get("discovered_subdomains", [])
+    count = data.get("discovered_count", 0)
+
+    console.print(f"[bold]Discovered:[/bold]    {count} subdomains")
+    console.print(f"[bold]Wordlist:[/bold]      {data.get('wordlist_size', 0)} entries")
+    console.print(f"[bold]Attempts:[/bold]      {data.get('attempts', 0)}")
+    console.print(f"[bold]Duration:[/bold]      {data.get('duration_seconds', 0)}s")
+    console.print(f"[bold]Rate limit:[/bold]    {data.get('queries_per_second', 0)} qps")
+
+    if not discovered:
+        console.print("\n[dim]No subdomains resolved against the wordlist.[/dim]")
+        return
+
+    console.print(f"\n[bold cyan]Discovered subdomains[/bold cyan]")
+
+    # Show all discoveries with their IPs — these are the operational findings
+    for entry in discovered:
+        hostname = entry["hostname"]
+        ips = entry.get("ips", [])
+        ip_display = ", ".join(ips) if ips else "[dim]no IPs[/dim]"
+        console.print(f"  • {hostname:40s}  → {ip_display}")
+
+
 # ── Renderers for WHOIS and IP Intel ──────────────────────────
 
 
@@ -740,6 +830,8 @@ def investigate(
     skip_scan: bool = typer.Option(False, "--skip-scan", help="Skip the threat verdict pipeline"),
     skip_slow: bool = typer.Option(False, "--skip-slow",
                                    help="Skip slow tools (urlscan.io adds ~30s)"),
+    with_subdomains: bool = typer.Option(False, "--with-subdomains",
+                                          help="Also run active subdomain enumeration (~15s)"),
 ) -> None:
     """
     Run all recon tools plus the threat analysis pipeline on a target.
@@ -750,7 +842,7 @@ def investigate(
     threat verdict.
     """
     logging.basicConfig(level=logging.WARNING)
-    for noisy in ("httpx", "httpcore", "urllib3", "whois"):
+    for noisy in ("httpx", "httpcore", "urllib3", "whois", "dns"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     from rich.progress import Progress, SpinnerColumn, TextColumn
@@ -760,6 +852,9 @@ def investigate(
     from atlas.recon.dns import DNSReconTool
     from atlas.recon.http_headers import HTTPHeadersReconTool
     from atlas.recon.ip_intel import IPIntelReconTool
+    from atlas.recon.subdomains import (
+        SubdomainReconTool, ensure_acknowledged, mark_acknowledged,
+    )
     from atlas.recon.urlscan import URLScanReconTool
     from atlas.recon.web_recon import WebReconTool
     from atlas.recon.whois_lookup import WhoisReconTool
@@ -767,6 +862,27 @@ def investigate(
     config = get_config()
     clean_domain = extract_domain(target) if "/" in target else target.lower().strip()
     full_url = normalize_url(target if "/" in target else clean_domain)
+
+    # Active-recon ack check happens once, before the investigation starts,
+    # so the warning doesn't interrupt mid-flow.
+    if with_subdomains and not ensure_acknowledged():
+        console.print()
+        console.print(Panel(
+            Text(
+                "⚠  Active Recon Notice\n\n"
+                "Subdomain enumeration generates real DNS queries against\n"
+                "public infrastructure. Running this against domains you don't\n"
+                "own or have permission to test may violate terms of service\n"
+                "or local laws. Use responsibly.\n\n"
+                "This warning will only be shown once.",
+                style="bold yellow",
+            ),
+            border_style="yellow",
+        ))
+        if not typer.confirm("\nProceed?", default=True):
+            console.print("[dim]Aborted.[/dim]")
+            raise typer.Exit(0)
+        mark_acknowledged()
 
     # Header for the whole investigation
     console.print()
@@ -801,6 +917,13 @@ def investigate(
         ("━━━ urlscan.io Sandbox ━━━", URLScanReconTool(config), full_url,
          "urlscan.io (Sandbox Browser Analysis)", True),  # True = slow
     ]
+
+    # Optional active-recon step
+    if with_subdomains:
+        tools.append(
+            ("━━━ Subdomain Enumeration ━━━", SubdomainReconTool(config), clean_domain,
+             "Subdomain Enumeration", True)
+        )
 
     for section_header, tool, target_input, render_title, is_slow in tools:
         if is_slow and skip_slow:
