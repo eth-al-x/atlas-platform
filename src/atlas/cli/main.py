@@ -271,6 +271,7 @@ def _print_recon_result(result, title: str) -> None:
         "web_recon": _render_web_recon,
         "whois": _render_whois,
         "ip_intel": _render_ip_intel,
+        "crtsh": _render_crtsh,
     }
     renderer = renderers.get(result.recon_type)
     if renderer:
@@ -459,6 +460,24 @@ def recon_ip(
     _print_recon_result(result, "IP Intelligence")
 
 
+@recon_app.command("crtsh")
+def recon_crtsh(
+    domain: str = typer.Argument(..., help="Domain to look up in CT logs"),
+) -> None:
+    """Search Certificate Transparency logs (crt.sh) for cert history and subdomains."""
+    logging.basicConfig(level=logging.WARNING)
+    for noisy in ("httpx", "httpcore", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    from atlas.core.domain import extract_domain
+    from atlas.recon.crtsh import CrtShReconTool
+
+    clean_domain = extract_domain(domain) if "/" in domain else domain.lower().strip()
+    tool = CrtShReconTool(get_config())
+    result = tool.run(clean_domain)
+    _print_recon_result(result, "Certificate Transparency (crt.sh)")
+
+
 # ── Renderers for WHOIS and IP Intel ──────────────────────────
 
 
@@ -556,6 +575,53 @@ def _render_ip_intel(result) -> None:
             console.print(f"  Software:     {len(cpes)} components identified")
 
 
+def _render_crtsh(result) -> None:
+    """Render CT log data — cert counts, issuers, discovered subdomains."""
+    data = result.data
+    total = data.get("total_certs", 0)
+    recent = data.get("recent_certs_30d", 0)
+
+    if total == 0:
+        console.print("[dim]No certificates found in CT logs.[/dim]")
+        return
+
+    # Headline metrics
+    console.print(f"[bold]Total certs in CT logs:[/bold]  {total}")
+
+    recent_color = "yellow" if recent > 10 else ("red" if recent > 30 else "green")
+    console.print(f"[bold]Issued in last 30 days:[/bold]  "
+                  f"[{recent_color}]{recent}[/{recent_color}]")
+
+    if data.get("oldest_cert_date"):
+        console.print(f"[bold]Oldest cert:[/bold]             {data['oldest_cert_date'][:10]}")
+    if data.get("newest_cert_date"):
+        console.print(f"[bold]Newest cert:[/bold]             {data['newest_cert_date'][:10]}")
+
+    # Issuer breakdown
+    issuers = data.get("issuers", {})
+    if issuers:
+        console.print(f"\n[bold cyan]Top issuers[/bold cyan]")
+        for issuer, count in issuers.items():
+            console.print(f"  • {issuer}: {count} certs")
+
+    # Discovered subdomains — the most operationally useful part
+    subdomains = data.get("unique_subdomains", [])
+    wildcards = data.get("wildcard_subdomains", [])
+
+    console.print(f"\n[bold cyan]Discovered subdomains[/bold cyan] "
+                  f"({len(subdomains)} regular + {len(wildcards)} wildcard)")
+
+    for sub in subdomains[:20]:
+        console.print(f"  • {sub}")
+    if len(subdomains) > 20:
+        console.print(f"  [dim](+{len(subdomains) - 20} more — use --verbose to see all)[/dim]")
+
+    if wildcards:
+        console.print(f"\n[bold]Wildcard certs:[/bold]")
+        for w in wildcards[:5]:
+            console.print(f"  • {w}")
+
+
 # ── Unified investigate command ───────────────────────────────
 
 
@@ -576,6 +642,7 @@ def investigate(
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     from atlas.core.domain import extract_domain, normalize_url
+    from atlas.recon.crtsh import CrtShReconTool
     from atlas.recon.dns import DNSReconTool
     from atlas.recon.http_headers import HTTPHeadersReconTool
     from atlas.recon.ip_intel import IPIntelReconTool
@@ -610,6 +677,8 @@ def investigate(
         ("━━━ DNS Records ━━━", DNSReconTool(config), clean_domain, "DNS Lookup"),
         ("━━━ WHOIS ━━━", WhoisReconTool(config), clean_domain, "WHOIS"),
         ("━━━ IP Intelligence ━━━", IPIntelReconTool(config), clean_domain, "IP Intelligence"),
+        ("━━━ Certificate Transparency ━━━", CrtShReconTool(config), clean_domain,
+         "Certificate Transparency (crt.sh)"),
         ("━━━ HTTP Headers ━━━", HTTPHeadersReconTool(config), full_url, "HTTP Headers"),
         ("━━━ Web Content ━━━", WebReconTool(config), full_url, "Web Recon"),
     ]
