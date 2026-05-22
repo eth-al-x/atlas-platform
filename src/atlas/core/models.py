@@ -64,6 +64,7 @@ class ScanReport(BaseModel):
     domain: str
     final_verdict: Verdict = Verdict.CLEAN
     tier_results: list[TierResult] = Field(default_factory=list)
+    correlations: list["CorrelationResult"] = Field(default_factory=list)
     scanned_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     scan_duration_ms: int = 0
     source: ScanSource = ScanSource.CLI
@@ -87,6 +88,36 @@ class ReconResult(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
     performed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ── Correlation Results ──────────────────────────────────────
+
+
+class CorrelationContext(BaseModel):
+    """
+    Input bundle passed to correlators.
+
+    A correlator reads completed scan + recon data and produces higher-order
+    insights. It never re-runs the underlying tools.
+    """
+    scan: ScanReport
+    recon: dict[str, ReconResult] = Field(default_factory=dict)
+
+
+class CorrelationResult(BaseModel):
+    """
+    Standardized output from any correlator.
+
+    Mirrors TierResult / ReconResult in spirit but carries synthesis findings
+    rather than raw verdicts or raw data.
+    """
+    correlator_name: str = ""
+    display_name: str = ""
+    summary: str = ""                                  # One-line human-readable summary
+    findings: list[dict[str, Any]] = Field(default_factory=list)  # Structured findings
+    data: dict[str, Any] = Field(default_factory=dict)            # Tool-specific extras
+    error: str | None = None
+    duration_ms: int = 0
 
 
 # ── Statistics ───────────────────────────────────────────────

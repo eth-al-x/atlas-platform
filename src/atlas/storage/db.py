@@ -11,7 +11,7 @@ import sqlite3
 from pathlib import Path
 
 from atlas.core.config import get_config
-from atlas.core.models import ScanReport, ScanStats, TierResult, Verdict
+from atlas.core.models import CorrelationResult, ScanReport, ScanStats, TierResult, Verdict
 
 
 logger = logging.getLogger(__name__)
@@ -39,10 +39,23 @@ CREATE TABLE IF NOT EXISTS tier_results (
     duration_ms INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS correlations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_id INTEGER NOT NULL REFERENCES scans(id),
+    correlator_name TEXT NOT NULL,
+    display_name TEXT,
+    summary TEXT,
+    findings JSON,
+    data JSON,
+    error TEXT,
+    duration_ms INTEGER
+);
+
 CREATE INDEX IF NOT EXISTS idx_scans_domain ON scans(domain);
 CREATE INDEX IF NOT EXISTS idx_scans_verdict ON scans(final_verdict);
 CREATE INDEX IF NOT EXISTS idx_scans_scanned_at ON scans(scanned_at);
 CREATE INDEX IF NOT EXISTS idx_tier_scan ON tier_results(scan_id);
+CREATE INDEX IF NOT EXISTS idx_correlation_scan ON correlations(scan_id);
 """
 
 
@@ -95,9 +108,56 @@ class ScanRepository:
                      tr.confidence, json.dumps(tr.details), tr.error, tr.duration_ms),
                 )
 
+            for cr in report.correlations:
+                conn.execute(
+                    "INSERT INTO correlations "
+                    "(scan_id, correlator_name, display_name, summary, findings, data, error, duration_ms) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (scan_id, cr.correlator_name, cr.display_name, cr.summary,
+                     json.dumps(cr.findings), json.dumps(cr.data), cr.error, cr.duration_ms),
+                )
+
             conn.commit()
             logger.debug("Saved scan %d for %s", scan_id, report.url)
             return scan_id
+        finally:
+            conn.close()
+
+    def save_correlations(self, scan_id: int, correlations: list[CorrelationResult]) -> None:
+        """Persist correlation results for an existing scan."""
+        conn = self._conn()
+        try:
+            for cr in correlations:
+                conn.execute(
+                    "INSERT INTO correlations "
+                    "(scan_id, correlator_name, display_name, summary, findings, data, error, duration_ms) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (scan_id, cr.correlator_name, cr.display_name, cr.summary,
+                     json.dumps(cr.findings), json.dumps(cr.data), cr.error, cr.duration_ms),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_correlations(self, scan_id: int) -> list[CorrelationResult]:
+        """Retrieve correlation results for a scan."""
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM correlations WHERE scan_id = ? ORDER BY id", (scan_id,)
+            ).fetchall()
+            return [
+                CorrelationResult(
+                    correlator_name=row["correlator_name"],
+                    display_name=row["display_name"] or "",
+                    summary=row["summary"] or "",
+                    findings=json.loads(row["findings"]) if row["findings"] else [],
+                    data=json.loads(row["data"]) if row["data"] else {},
+                    error=row["error"],
+                    duration_ms=row["duration_ms"] or 0,
+                )
+                for row in rows
+            ]
         finally:
             conn.close()
 
@@ -111,6 +171,10 @@ class ScanRepository:
 
             tier_rows = conn.execute(
                 "SELECT * FROM tier_results WHERE scan_id = ? ORDER BY id", (scan_id,)
+            ).fetchall()
+
+            corr_rows = conn.execute(
+                "SELECT * FROM correlations WHERE scan_id = ? ORDER BY id", (scan_id,)
             ).fetchall()
 
             return ScanReport(
@@ -130,6 +194,18 @@ class ScanRepository:
                         duration_ms=tr["duration_ms"] or 0,
                     )
                     for tr in tier_rows
+                ],
+                correlations=[
+                    CorrelationResult(
+                        correlator_name=cr["correlator_name"],
+                        display_name=cr["display_name"] or "",
+                        summary=cr["summary"] or "",
+                        findings=json.loads(cr["findings"]) if cr["findings"] else [],
+                        data=json.loads(cr["data"]) if cr["data"] else {},
+                        error=cr["error"],
+                        duration_ms=cr["duration_ms"] or 0,
+                    )
+                    for cr in corr_rows
                 ],
             )
         finally:
