@@ -950,6 +950,59 @@ def investigate(
         _print_recon_result(result, render_title)
 
 
+# ── Serve command ─────────────────────────────────────────────
+
+
+@app.command("serve")
+def serve(
+    host: str = typer.Option("0.0.0.0", "--host", help="Bind address."),
+    port: int = typer.Option(8000, "--port", help="Port to listen on."),
+    reload: bool = typer.Option(False, "--reload", help="Auto-reload on code changes (dev mode)."),
+    workers: int = typer.Option(1, "--workers", help="Number of uvicorn worker processes."),
+) -> None:
+    """
+    Start the ATLAS REST API server.
+
+    Launches a uvicorn server exposing the full ATLAS API.
+    Browse to http://localhost:<port>/docs for the interactive Swagger UI.
+
+    Examples:
+
+        atlas serve                          # Default: 0.0.0.0:8000
+
+        atlas serve --port 9000             # Custom port
+
+        atlas serve --reload                # Dev mode with auto-reload
+
+        atlas serve --host 127.0.0.1       # Local-only binding
+    """
+    try:
+        import uvicorn
+    except ImportError:
+        console.print(
+            "[bold red]uvicorn is not installed.[/bold red] "
+            "Run [bold]pip install 'atlas[api]'[/bold] to add API support.",
+            highlight=False,
+        )
+        raise typer.Exit(1)
+
+    console.print(
+        f"\n[bold cyan]ATLAS API[/bold cyan] starting on "
+        f"[bold]http://{host}:{port}[/bold]\n"
+        f"  Swagger UI → [link]http://localhost:{port}/docs[/link]\n"
+        f"  ReDoc      → [link]http://localhost:{port}/redoc[/link]\n"
+    )
+
+    uvicorn.run(
+        "atlas.api.main:app",
+        host=host,
+        port=port,
+        reload=reload,
+        workers=workers if not reload else 1,  # workers > 1 incompatible with reload
+        log_level="info",
+    )
+
+
 # ── Entry point ───────────────────────────────────────────────
 
 if __name__ == "__main__":
