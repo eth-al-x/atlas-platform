@@ -23,7 +23,7 @@ from rich.table import Table
 from rich.text import Text
 
 from atlas.core.config import get_config
-from atlas.core.models import ScanReport, ScanRequest, ScanSource, Verdict
+from atlas.core.models import ReconResult, ScanReport, ScanRequest, ScanSource, Verdict
 from atlas.core.pipeline import AnalysisPipeline
 from atlas.storage.db import ScanRepository
 
@@ -925,6 +925,9 @@ def investigate(
              "Subdomain Enumeration", True)
         )
 
+    # Accumulate recon results for correlation
+    recon_results: dict[str, ReconResult] = {}
+
     for section_header, tool, target_input, render_title, is_slow in tools:
         if is_slow and skip_slow:
             continue
@@ -947,7 +950,98 @@ def investigate(
         else:
             result = tool.run(target_input)
 
+        recon_results[tool.name] = result
         _print_recon_result(result, render_title)
+
+    # ── Correlations ─────────────────────────────────────────
+    console.print(f"\n[bold cyan]━━━ Correlations ━━━[/bold cyan]\n")
+    from atlas.correlate.pipeline import CorrelationPipeline
+    from atlas.core.models import CorrelationContext
+
+    correlation_pipeline = CorrelationPipeline(config=config)
+    context = CorrelationContext(scan=report, recon=recon_results)
+    correlations = correlation_pipeline.correlate(context)
+
+    # Attach + persist correlations against this scan
+    report.correlations = correlations
+    if scan_id:
+        repo.save_correlations(scan_id, correlations)
+
+    for cr in correlations:
+        _print_correlation(cr)
+
+
+def _print_correlation(cr) -> None:
+    """Render a single CorrelationResult."""
+    from rich.panel import Panel
+
+    if cr.error:
+        console.print(Panel(
+            f"[bold red]Error:[/bold red] {cr.error}",
+            title=f"❌ {cr.display_name}",
+            border_style="red",
+        ))
+        return
+
+    # Compose body
+    body = f"[bold]{cr.summary}[/bold]\n"
+    if cr.findings:
+        body += "\n"
+        for f in cr.findings[:10]:  # cap to keep output sane
+            if cr.correlator_name == "risk_score":
+                body += f"  • [yellow]+{f.get('points', 0)}[/yellow] — {f.get('reason', '')}\n"
+            elif cr.correlator_name == "timeline":
+                body += f"  • [cyan]{f.get('date', '')[:10]}[/cyan] — {f.get('event', '')}\n"
+            elif cr.correlator_name == "mitre":
+                body += f"  • [magenta]{f.get('technique_id')}[/magenta] {f.get('name')} ([dim]{f.get('tactic')}[/dim])\n"
+        if len(cr.findings) > 10:
+            body += f"  [dim]...and {len(cr.findings) - 10} more[/dim]\n"
+
+    # Observations for timeline
+    obs = cr.data.get("observations", [])
+    if obs:
+        body += "\n[bold]Observations:[/bold]\n"
+        for o in obs:
+            body += f"  • {o}\n"
+
+    console.print(Panel(body.rstrip(), title=f"🔗 {cr.display_name}", border_style="cyan"))
+
+
+# ── Correlate subcommand ──────────────────────────────────────
+
+
+@app.command()
+def correlate(
+    scan_id: int = typer.Argument(..., help="Scan ID to re-correlate."),
+) -> None:
+    """
+    Run correlators against an existing scan (without re-running tiers/recon).
+
+    Useful for re-analyzing past scans after adding new correlators, or for
+    inspecting what synthesis a scan produces without re-paying the cost
+    of fresh recon.
+    """
+    repo = _get_repo()
+    report = repo.get_scan(scan_id)
+    if not report:
+        console.print(f"[bold red]Scan {scan_id} not found.[/bold red]")
+        raise typer.Exit(1)
+
+    # Without stored recon data we can only correlate against tier results
+    from atlas.correlate.pipeline import CorrelationPipeline
+    from atlas.core.models import CorrelationContext
+
+    config = get_config()
+    pipeline = CorrelationPipeline(config=config)
+    context = CorrelationContext(scan=report, recon={})
+    correlations = pipeline.correlate(context)
+
+    report.correlations = correlations
+    repo.save_correlations(scan_id, correlations)
+
+    console.print(f"\n[bold]Correlations for scan #{scan_id}[/bold] — {report.url}\n")
+    for cr in correlations:
+        _print_correlation(cr)
 
 
 # ── Serve command ─────────────────────────────────────────────

@@ -31,6 +31,7 @@ from atlas.api.routes.scan import router as scan_router
 from atlas.api.routes.recon import router as recon_router
 from atlas.api.routes.recon import investigate_router
 from atlas.api.routes.stats import router as stats_router
+from atlas.api.routes.correlate import router as correlate_router
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,7 @@ def create_app() -> FastAPI:
     app.include_router(scan_router, prefix="/api/v1")
     app.include_router(recon_router, prefix="/api/v1")
     app.include_router(investigate_router, prefix="/api/v1")
+    app.include_router(correlate_router, prefix="/api/v1")
     app.include_router(stats_router, prefix="/api/v1")
 
     # ── Root redirect ─────────────────────────────────────────

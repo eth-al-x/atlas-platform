@@ -15,7 +15,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from atlas.core.models import ReconResult, ScanReport, ScanStats, Verdict
+from atlas.core.models import CorrelationResult, ReconResult, ScanReport, ScanStats, Verdict
 
 
 # ── Request bodies ────────────────────────────────────────────
@@ -120,6 +120,14 @@ class ReconResponse(BaseModel):
 
     result: ReconResult
     message: str = "Recon complete."
+
+
+class CorrelateResponse(BaseModel):
+    """Correlation results for a scan."""
+
+    scan_id: int
+    correlations: list[CorrelationResult]
+    message: str = "Correlation complete."
 
 
 class StatsResponse(BaseModel):
