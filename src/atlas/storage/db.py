@@ -221,6 +221,7 @@ class ScanRepository:
         ip: str | None = None,
         asn: str | None = None,
         registrar: str | None = None,
+        favicon_hash: int | None = None,
         limit_per_category: int = 10,
     ) -> dict[str, list[dict]]:
         """
@@ -230,11 +231,11 @@ class ScanRepository:
         JSON without needing a normalized schema. Each match category returns
         up to `limit_per_category` results, ordered by recency.
 
-        Returns a dict keyed by attribute name ('ip', 'asn', 'registrar'), each
-        mapping to a list of matched scans with their domain, verdict, and
-        scan date for display.
+        Returns a dict keyed by attribute name ('ip', 'asn', 'registrar',
+        'favicon'), each mapping to a list of matched scans with their domain,
+        verdict, and scan date for display.
         """
-        related: dict[str, list[dict]] = {"ip": [], "asn": [], "registrar": []}
+        related: dict[str, list[dict]] = {"ip": [], "asn": [], "registrar": [], "favicon": []}
         conn = self._conn()
         try:
             if ip:
@@ -264,6 +265,17 @@ class ScanRepository:
                     exclude_scan_id=exclude_scan_id,
                     limit=limit_per_category,
                 )
+            if favicon_hash is not None:
+                # MMH3 returns an int; SQLite JSON1 also compares ints, so we
+                # pass it through directly. No type coercion needed.
+                related["favicon"] = self._match_recon(
+                    conn,
+                    recon_type="web_recon",
+                    json_path="$.favicon.mmh3_hash",
+                    value=favicon_hash,
+                    exclude_scan_id=exclude_scan_id,
+                    limit=limit_per_category,
+                )
             return related
         finally:
             conn.close()
@@ -274,7 +286,7 @@ class ScanRepository:
         *,
         recon_type: str,
         json_path: str,
-        value: str,
+        value: str | int,
         exclude_scan_id: int,
         limit: int,
     ) -> list[dict]:

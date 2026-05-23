@@ -1563,6 +1563,111 @@ def _print_watch_alert(alert: "WatchAlert") -> None:  # type: ignore[name-define
     )
 
 
+# ── Pivot subcommand group ────────────────────────────────────
+#
+# Pivots take a single piece of evidence (an IP, a favicon hash, etc.) and
+# answer "what else have we scanned that shares this attribute?". This is
+# the same machinery the cross-scan correlator uses, but exposed as direct
+# investigative commands so an analyst can pivot from any signal without
+# needing to first scan a domain.
+
+pivot_app = typer.Typer(
+    name="pivot",
+    help="Pivot from a single piece of evidence to all related scans.",
+    no_args_is_help=True,
+)
+app.add_typer(pivot_app, name="pivot")
+
+
+@pivot_app.command("favicon")
+def pivot_favicon(
+    favicon_hash: int = typer.Argument(
+        ...,
+        help="MMH3 favicon hash (signed 32-bit int, Shodan-compatible).",
+    ),
+    output: str = typer.Option(
+        "terminal", "--output", "-o",
+        help="Output format: terminal (default), json, or csv",
+    ),
+) -> None:
+    """
+    Find every prior scan whose favicon hashed to the same MMH3 value.
+
+    Favicons are one of the strongest brand-impersonation signals available:
+    phishing kits almost universally copy the target brand's icon. Two
+    domains sharing a favicon hash are very likely either the same site
+    or both impersonating the same brand.
+    """
+    from atlas.core.export import OUTPUT_FORMATS
+    import csv as _csv, io as _io
+
+    if output not in OUTPUT_FORMATS:
+        console.print(f"[red]Invalid --output: {output!r}. Use: {', '.join(OUTPUT_FORMATS)}[/red]")
+        raise typer.Exit(2)
+
+    repo = _get_repo()
+    related = repo.find_related_scans(
+        exclude_scan_id=-1,  # don't exclude anything — caller didn't scan
+        favicon_hash=favicon_hash,
+    )
+    matches = related.get("favicon", [])
+
+    if output == "json":
+        typer.echo(json.dumps(
+            {"favicon_hash": favicon_hash, "matches": matches},
+            indent=2, default=str,
+        ))
+        return
+
+    if output == "csv":
+        columns = ("scan_id", "domain", "url", "verdict", "scanned_at")
+        buf = _io.StringIO()
+        writer = _csv.DictWriter(buf, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        for m in matches:
+            writer.writerow(m)
+        typer.echo(buf.getvalue(), nl=False)
+        return
+
+    # ── Terminal output ───────────────────────────────────────
+    if not matches:
+        console.print(
+            f"[dim]No scans found with favicon hash[/dim] [bold]{favicon_hash}[/bold]"
+        )
+        return
+
+    from atlas.core.models import Verdict
+    table = Table(
+        title=f"Scans sharing favicon hash [bold cyan]{favicon_hash}[/bold cyan]",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Scan ID", justify="right", min_width=8)
+    table.add_column("Domain", min_width=24)
+    table.add_column("URL", min_width=32)
+    table.add_column("Verdict", min_width=12)
+    table.add_column("Scanned At", min_width=20)
+
+    for m in matches:
+        verdict_enum = next(
+            (v for v in Verdict if v.value == m["verdict"]),
+            Verdict.CLEAN,
+        )
+        _, color = _verdict_style(verdict_enum)
+        table.add_row(
+            str(m["scan_id"]),
+            m["domain"],
+            (m.get("url") or "")[:60],
+            f"[{color}]{m['verdict']}[/{color}]",
+            (m.get("scanned_at") or "")[:19],
+        )
+    console.print(table)
+    console.print(
+        f"[dim]{len(matches)} match(es). "
+        f"Domains sharing a favicon often share an operator or impersonation target.[/dim]"
+    )
+
+
 # ── Entry point ───────────────────────────────────────────────
 
 if __name__ == "__main__":

@@ -35,6 +35,7 @@ from atlas.api.routes.recon import investigate_router
 from atlas.api.routes.stats import router as stats_router
 from atlas.api.routes.correlate import router as correlate_router
 from atlas.api.routes.watches import router as watches_router
+from atlas.api.routes.pivot import router as pivot_router
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,7 @@ def create_app() -> FastAPI:
     app.include_router(correlate_router, prefix="/api/v1")
     app.include_router(stats_router, prefix="/api/v1")
     app.include_router(watches_router, prefix="/api/v1")
+    app.include_router(pivot_router, prefix="/api/v1")
 
     # ── Dashboard (static files) ──────────────────────────────
     # The dashboard is a single-page app served as plain static files.

@@ -84,8 +84,9 @@ class CrossScanCorrelator(Correlator):
         ip = self._current_ip(context)
         asn = self._current_asn(context)
         registrar = self._current_registrar(context)
+        favicon_hash = self._current_favicon_hash(context)
 
-        if not any([ip, asn, registrar]):
+        if not any([ip, asn, registrar, favicon_hash is not None]):
             return CorrelationResult(
                 summary="No pivot attributes available for cross-scan correlation",
                 findings=[],
@@ -97,6 +98,7 @@ class CrossScanCorrelator(Correlator):
             ip=ip,
             asn=asn,
             registrar=registrar,
+            favicon_hash=favicon_hash,
         )
 
         findings: list[dict[str, Any]] = []
@@ -104,6 +106,7 @@ class CrossScanCorrelator(Correlator):
             ("ip", "Same IP", ip),
             ("asn", "Same ASN", asn),
             ("registrar", "Same registrar", registrar),
+            ("favicon", "Same favicon", favicon_hash),
         ):
             for row in related.get(category, []):
                 findings.append({
@@ -131,6 +134,8 @@ class CrossScanCorrelator(Correlator):
                 parts.append(f"{len(related['asn'])} on same ASN")
             if related.get("registrar"):
                 parts.append(f"{len(related['registrar'])} via same registrar")
+            if related.get("favicon"):
+                parts.append(f"{len(related['favicon'])} sharing favicon")
             summary = (
                 f"{len(unique_domains)} related domain(s) found ({', '.join(parts)})"
             )
@@ -148,6 +153,7 @@ class CrossScanCorrelator(Correlator):
                     "ip": ip,
                     "asn": asn,
                     "registrar": registrar,
+                    "favicon_hash": favicon_hash,
                 },
             },
         )
@@ -178,3 +184,19 @@ class CrossScanCorrelator(Correlator):
             return None
         registrar = whois_data.data.get("registrar")
         return registrar if isinstance(registrar, str) and registrar else None
+
+    @staticmethod
+    def _current_favicon_hash(context: CorrelationContext) -> int | None:
+        """
+        Pull the MMH3 favicon hash from the current scan's web_recon data.
+        Returns None if web_recon didn't run, failed, or got no favicon —
+        all of which are normal outcomes that should leave this pivot inactive.
+        """
+        web_data = context.recon.get("web_recon")
+        if not web_data or web_data.error:
+            return None
+        favicon = web_data.data.get("favicon") or {}
+        if not isinstance(favicon, dict) or favicon.get("error"):
+            return None
+        h = favicon.get("mmh3_hash")
+        return h if isinstance(h, int) else None

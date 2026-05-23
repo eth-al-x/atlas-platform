@@ -150,7 +150,7 @@ class TestFindRelatedScans:
     def test_no_pivots_no_results(self, db_repo):
         _populate_three_scans(db_repo)
         related = db_repo.find_related_scans(exclude_scan_id=999)
-        assert related == {"ip": [], "asn": [], "registrar": []}
+        assert related == {"ip": [], "asn": [], "registrar": [], "favicon": []}
 
     def test_no_matches_returns_empty_lists(self, db_repo):
         _populate_three_scans(db_repo)
