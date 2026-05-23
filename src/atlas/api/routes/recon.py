@@ -55,6 +55,7 @@ def _make_recon_tools(config: AtlasConfig) -> dict:
     from atlas.recon.crtsh import CrtShReconTool
     from atlas.recon.urlscan import URLScanReconTool
     from atlas.recon.subdomains import SubdomainReconTool
+    from atlas.recon.email_recon import EmailReconTool
 
     return {
         "dns": DNSReconTool(config),
@@ -65,6 +66,7 @@ def _make_recon_tools(config: AtlasConfig) -> dict:
         "crtsh": CrtShReconTool(config),
         "urlscan": URLScanReconTool(config),
         "subdomains": SubdomainReconTool(config),
+        "email_recon": EmailReconTool(config),
     }
 
 
@@ -223,6 +225,27 @@ async def recon_subdomains(
     return ReconResponse(result=result)
 
 
+@router.get(
+    "/email/{domain}",
+    response_model=ReconResponse,
+    summary="Email infrastructure & anti-spoofing posture",
+    description=(
+        "Resolves MX records and parses SPF, DMARC, and DKIM policies "
+        "for the domain. Returns a 0–100 posture score plus the raw "
+        "policies and a list of human-readable issues.\n\n"
+        "Pure DNS, fast (< 5s typical). A domain that impersonates a "
+        "brand but has no MX or weak DMARC is overwhelmingly more "
+        "likely to be a phishing lander than a real corporate domain."
+    ),
+)
+async def recon_email(
+    domain: str,
+    tools: dict = Depends(get_tools),
+) -> ReconResponse:
+    result = await _run_tool(tools["email_recon"], domain)
+    return ReconResponse(result=result)
+
+
 # ── Investigate endpoint ──────────────────────────────────────
 
 
@@ -268,6 +291,7 @@ async def investigate(
         "crtsh": (domain, {}),
         "http_headers": (body.url, {}),
         "web_recon": (body.url, {}),
+        "email_recon": (domain, {}),
     }
 
     if not body.skip_slow:

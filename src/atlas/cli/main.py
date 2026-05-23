@@ -677,6 +677,111 @@ def _render_subdomains(result) -> None:
         console.print(f"  • {hostname:40s}  → {ip_display}")
 
 
+@recon_app.command("email")
+def recon_email(
+    domain: str = typer.Argument(..., help="Domain to profile (e.g. example.com)"),
+) -> None:
+    """
+    Profile a domain's email infrastructure: MX, SPF, DMARC, DKIM.
+
+    Reports the raw policies plus a 0–100 posture score. Useful for
+    confirming brand-impersonation suspicions: a domain that *looks*
+    like a major brand but has no MX or DMARC `p=none` is highly
+    likely to be a phishing lander.
+    """
+    logging.basicConfig(level=logging.WARNING)
+    for noisy in ("httpx", "httpcore", "urllib3", "dns"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    from atlas.core.domain import extract_domain
+    from atlas.recon.email_recon import EmailReconTool
+
+    clean = extract_domain(domain) if "/" in domain else domain.lower().strip()
+    tool = EmailReconTool(get_config())
+    result = tool.run(clean)
+    _render_email_posture(result)
+
+
+def _render_email_posture(result) -> None:
+    """Render the email recon output as a posture summary + record details."""
+    data = result.data
+    posture = data.get("posture", {})
+    score = posture.get("score", 0)
+    level = posture.get("level", "none")
+    issues = posture.get("issues", []) or []
+
+    # Color the headline score by posture level
+    level_styles: dict[str, tuple[str, str]] = {
+        "strict":  ("bright_green", "STRICT"),
+        "strong":  ("green",        "STRONG"),
+        "partial": ("yellow",       "PARTIAL"),
+        "minimal": ("dark_orange",  "MINIMAL"),
+        "none":    ("red",          "NONE"),
+    }
+    color, label = level_styles.get(level, ("white", level.upper()))
+
+    header = Text()
+    header.append(f"📧 Email Posture\n", style="bold blue")
+    header.append(f"Domain: {result.domain}\n", style="dim")
+    header.append(f"Score:  ", style="dim")
+    header.append(f"{score}/100  ", style=f"bold {color}")
+    header.append(f"[{label}]", style=color)
+    console.print(Panel(header, border_style="blue"))
+
+    # ── MX ─────────────────────────────────────────────────
+    mx = data.get("mx") or {}
+    console.print("\n[bold cyan]MX records[/bold cyan]")
+    if mx.get("has_mx"):
+        for rec in mx.get("records", []):
+            console.print(f"  pref {rec['preference']:>3}  {rec['exchange']}")
+    else:
+        console.print("  [red]✗ none — domain cannot receive mail[/red]")
+
+    # ── SPF ────────────────────────────────────────────────
+    spf = data.get("spf") or {}
+    console.print("\n[bold cyan]SPF[/bold cyan]")
+    if spf.get("has_spf"):
+        policy_colors = {"fail": "green", "softfail": "yellow", "neutral": "red", "pass": "red"}
+        pc = policy_colors.get(spf.get("policy", ""), "white")
+        console.print(f"  policy: [{pc}]{spf.get('policy')}[/{pc}]")
+        console.print(f"  record: [dim]{spf.get('record', '')[:120]}[/dim]")
+    else:
+        console.print("  [red]✗ no SPF record[/red]")
+
+    # ── DMARC ──────────────────────────────────────────────
+    dmarc = data.get("dmarc") or {}
+    console.print("\n[bold cyan]DMARC[/bold cyan]")
+    if dmarc.get("has_dmarc"):
+        policy_colors = {"reject": "green", "quarantine": "yellow", "none": "red"}
+        pc = policy_colors.get(dmarc.get("policy", ""), "white")
+        console.print(f"  policy: [{pc}]{dmarc.get('policy')}[/{pc}]  ({dmarc.get('pct', 100)}% enforcement)")
+        if dmarc.get("subdomain_policy"):
+            console.print(f"  sub-policy: {dmarc['subdomain_policy']}")
+        if dmarc.get("reporting_uri_aggregate"):
+            console.print(f"  rua: [dim]{dmarc['reporting_uri_aggregate']}[/dim]")
+    else:
+        console.print("  [red]✗ no DMARC record[/red]")
+
+    # ── DKIM ───────────────────────────────────────────────
+    dkim = data.get("dkim") or {}
+    console.print("\n[bold cyan]DKIM[/bold cyan]")
+    found = dkim.get("selectors_found", [])
+    if found:
+        console.print(f"  ✓ selectors found: {', '.join(found)}")
+    else:
+        console.print(
+            f"  [dim]✗ no key under common selectors "
+            f"({len(dkim.get('selectors_probed', []))} probed) — "
+            f"custom selectors aren't enumerable[/dim]"
+        )
+
+    # ── Issues ─────────────────────────────────────────────
+    if issues:
+        console.print("\n[bold yellow]Findings[/bold yellow]")
+        for issue in issues:
+            console.print(f"  • {issue}")
+
+
 # ── Renderers for WHOIS and IP Intel ──────────────────────────
 
 
@@ -1272,10 +1377,10 @@ def serve(
 
 # ── Watch subcommand group ────────────────────────────────────
 
-_watch_repo: "WatchRepository | None" = None  # type: ignore[name-defined]
+_watch_repo: "WatchRepository | None" = None  # type: ignore[name-defined]  # noqa: F821
 
 
-def _get_watch_repo() -> "WatchRepository":  # type: ignore[name-defined]
+def _get_watch_repo() -> "WatchRepository":  # type: ignore[name-defined]  # noqa: F821
     global _watch_repo
     if _watch_repo is None:
         from atlas.storage.db import WatchRepository
@@ -1534,7 +1639,7 @@ def watch_run(
         typer.echo(buf.getvalue(), nl=False)
 
 
-def _print_watch_alert(alert: "WatchAlert") -> None:  # type: ignore[name-defined]
+def _print_watch_alert(alert: "WatchAlert") -> None:  # type: ignore[name-defined]  # noqa: F821
     """Render a single watch alert line to the terminal."""
     direction_icon = {
         "new":           "🆕",
