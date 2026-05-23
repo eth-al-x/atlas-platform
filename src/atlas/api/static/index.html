@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ATLAS — Operations Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ───────── Sidebar ───────── -->
+<aside class="sidebar" aria-label="Primary navigation">
+  <header class="brand">
+    <div class="brand__mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="22" height="22">
+        <path d="M3 21 L12 3 L21 21 Z" fill="none" stroke="currentColor" stroke-width="1.5"/>
+        <path d="M8 17 L16 17" stroke="currentColor" stroke-width="1.5"/>
+      </svg>
+    </div>
+    <div class="brand__text">
+      <div class="brand__name">ATLAS</div>
+      <div class="brand__tag">ops console</div>
+    </div>
+  </header>
+
+  <nav class="nav">
+    <a href="#overview" data-route="overview" class="nav__item">
+      <span class="nav__dot"></span>
+      <span class="nav__label">Overview</span>
+    </a>
+    <a href="#scans" data-route="scans" class="nav__item">
+      <span class="nav__dot"></span>
+      <span class="nav__label">Scans</span>
+    </a>
+    <a href="#watches" data-route="watches" class="nav__item">
+      <span class="nav__dot"></span>
+      <span class="nav__label">Watch list</span>
+    </a>
+  </nav>
+
+  <footer class="sidebar__footer">
+    <div class="status" id="api-status">
+      <span class="status__dot" data-state="checking"></span>
+      <span class="status__text">checking api…</span>
+    </div>
+    <a class="docs-link" href="/docs" target="_blank" rel="noopener">api docs ↗</a>
+  </footer>
+</aside>
+
+<!-- ───────── Main ───────── -->
+<main class="main">
+  <div id="view" class="view" aria-live="polite"></div>
+</main>
+
+<!-- ───────── View templates ───────── -->
+
+<template id="tpl-overview">
+  <header class="page-header">
+    <div class="page-header__title">
+      <span class="bracket">[</span><span>overview</span><span class="bracket">]</span>
+    </div>
+    <div class="page-header__sub">aggregate state of the scan corpus</div>
+  </header>
+
+  <section class="kpi-grid">
+    <div class="kpi" data-kind="total">
+      <div class="kpi__label">total scans</div>
+      <div class="kpi__value" data-field="total">—</div>
+      <div class="kpi__sub" data-field="recent">— in 24h</div>
+    </div>
+    <div class="kpi" data-kind="high">
+      <div class="kpi__label">high risk</div>
+      <div class="kpi__value" data-field="high">—</div>
+      <div class="kpi__sub">flagged with high confidence</div>
+    </div>
+    <div class="kpi" data-kind="medium">
+      <div class="kpi__label">medium risk</div>
+      <div class="kpi__value" data-field="medium">—</div>
+      <div class="kpi__sub">moderate-confidence signals</div>
+    </div>
+    <div class="kpi" data-kind="low">
+      <div class="kpi__label">low risk</div>
+      <div class="kpi__value" data-field="low">—</div>
+      <div class="kpi__sub">weak structural signals</div>
+    </div>
+    <div class="kpi" data-kind="clean">
+      <div class="kpi__label">clean</div>
+      <div class="kpi__value" data-field="clean">—</div>
+      <div class="kpi__sub">no flags</div>
+    </div>
+  </section>
+
+  <section class="panel-grid">
+    <section class="panel panel--wide">
+      <header class="panel__head">
+        <span class="bracket">[</span>verdict distribution<span class="bracket">]</span>
+      </header>
+      <div class="panel__body">
+        <div id="verdict-chart" class="verdict-chart"></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <header class="panel__head">
+        <span class="bracket">[</span>top flagged domains<span class="bracket">]</span>
+      </header>
+      <div class="panel__body">
+        <div id="top-domains" class="data-list">
+          <div class="empty">no flagged domains yet</div>
+        </div>
+      </div>
+    </section>
+  </section>
+</template>
+
+<template id="tpl-scans">
+  <header class="page-header">
+    <div class="page-header__title">
+      <span class="bracket">[</span><span>scans</span><span class="bracket">]</span>
+    </div>
+    <div class="page-header__sub">recent analysis history</div>
+  </header>
+
+  <section class="filter-bar">
+    <label class="filter">
+      <span class="filter__label">verdict</span>
+      <select id="filter-verdict" class="filter__select">
+        <option value="">all</option>
+        <option value="High Risk">high risk</option>
+        <option value="Medium Risk">medium risk</option>
+        <option value="Low Risk">low risk</option>
+        <option value="Clean">clean</option>
+      </select>
+    </label>
+    <div class="filter__count" id="scan-count">—</div>
+  </section>
+
+  <section class="panel">
+    <table class="data-table" id="scans-table">
+      <thead>
+        <tr>
+          <th class="col-id">id</th>
+          <th class="col-domain">domain</th>
+          <th class="col-url">url</th>
+          <th class="col-verdict">verdict</th>
+          <th class="col-time">scanned at</th>
+          <th class="col-dur">ms</th>
+        </tr>
+      </thead>
+      <tbody id="scans-tbody">
+        <tr><td colspan="6" class="empty">loading…</td></tr>
+      </tbody>
+    </table>
+  </section>
+</template>
+
+<template id="tpl-scan-detail">
+  <header class="page-header">
+    <button class="back-link" data-action="back-to-scans">← scans</button>
+    <div class="page-header__title">
+      <span class="bracket">[</span><span data-field="domain">—</span><span class="bracket">]</span>
+    </div>
+    <div class="page-header__sub">
+      <span class="mono-id" data-field="id">scan id —</span>
+      ·
+      <span data-field="url">—</span>
+    </div>
+  </header>
+
+  <section class="verdict-banner" data-field="verdict-banner">
+    <div class="verdict-banner__label">final verdict</div>
+    <div class="verdict-banner__pill" data-field="verdict">—</div>
+    <div class="verdict-banner__meta">
+      <span data-field="meta-scanned">scanned —</span>
+      ·
+      <span data-field="meta-dur">— ms</span>
+    </div>
+  </section>
+
+  <section class="detail-grid">
+    <section class="panel">
+      <header class="panel__head">
+        <span class="bracket">[</span>tier results<span class="bracket">]</span>
+      </header>
+      <div class="panel__body">
+        <div id="tier-results" class="tier-list">—</div>
+      </div>
+    </section>
+
+    <section class="panel" id="risk-panel" hidden>
+      <header class="panel__head">
+        <span class="bracket">[</span>risk score<span class="bracket">]</span>
+      </header>
+      <div class="panel__body">
+        <div class="risk-display">
+          <div id="risk-gauge" class="risk-gauge"></div>
+          <div class="risk-breakdown" id="risk-breakdown"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" id="mitre-panel" hidden>
+      <header class="panel__head">
+        <span class="bracket">[</span>mitre att&amp;ck<span class="bracket">]</span>
+      </header>
+      <div class="panel__body">
+        <div id="mitre-chips" class="mitre-chips"></div>
+      </div>
+    </section>
+
+    <section class="panel" id="timeline-panel" hidden>
+      <header class="panel__head">
+        <span class="bracket">[</span>timeline<span class="bracket">]</span>
+      </header>
+      <div class="panel__body">
+        <ol id="timeline-events" class="timeline"></ol>
+      </div>
+    </section>
+
+    <section class="panel" id="cross-scan-panel" hidden>
+      <header class="panel__head">
+        <span class="bracket">[</span>related infrastructure<span class="bracket">]</span>
+      </header>
+      <div class="panel__body">
+        <div id="cross-scan-list" class="data-list"></div>
+      </div>
+    </section>
+
+    <section class="panel panel--wide" id="recon-panel" hidden>
+      <header class="panel__head">
+        <span class="bracket">[</span>recon<span class="bracket">]</span>
+      </header>
+      <div class="panel__body">
+        <div id="recon-tabs" class="recon-tabs"></div>
+        <pre id="recon-pre" class="recon-pre">—</pre>
+      </div>
+    </section>
+  </section>
+</template>
+
+<template id="tpl-watches">
+  <header class="page-header">
+    <div class="page-header__title">
+      <span class="bracket">[</span><span>watch list</span><span class="bracket">]</span>
+    </div>
+    <div class="page-header__sub">domains under continuous monitoring</div>
+  </header>
+
+  <section class="add-watch">
+    <input
+      type="text"
+      id="watch-input"
+      class="add-watch__input"
+      placeholder="evil.com or https://phishing.site/login"
+      autocomplete="off"
+    >
+    <button class="btn btn--accent" id="watch-add-btn">add</button>
+    <button class="btn" id="watch-run-btn">run all</button>
+  </section>
+
+  <section class="panel">
+    <table class="data-table" id="watches-table">
+      <thead>
+        <tr>
+          <th class="col-id">id</th>
+          <th class="col-domain">domain</th>
+          <th class="col-verdict">last verdict</th>
+          <th class="col-time">last checked</th>
+          <th class="col-checks">checks</th>
+          <th class="col-actions"></th>
+        </tr>
+      </thead>
+      <tbody id="watches-tbody">
+        <tr><td colspan="6" class="empty">loading…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="panel" id="watch-results-panel" hidden>
+    <header class="panel__head">
+      <span class="bracket">[</span>run results<span class="bracket">]</span>
+    </header>
+    <div class="panel__body">
+      <div id="watch-results" class="watch-results"></div>
+    </div>
+  </section>
+</template>
+
+<script src="app.js"></script>
+</body>
+</html>

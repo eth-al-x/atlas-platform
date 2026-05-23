@@ -148,3 +148,25 @@ class HealthResponse(BaseModel):
     version: str = "2.0.0"
     tiers_loaded: int = 0
     recon_tools_available: list[str] = Field(default_factory=list)
+
+
+# ── Watch list ────────────────────────────────────────────────
+
+
+class WatchRequestBody(BaseModel):
+    """POST /watches request body."""
+
+    target: str = Field(
+        ...,
+        description="Domain or URL to watch.",
+        examples=["evil.com", "https://phishing.site/login"],
+    )
+
+
+class WatchRunRequestBody(BaseModel):
+    """POST /watches/run request body."""
+
+    changed_only: bool = Field(
+        default=False,
+        description="Only return alerts where the verdict changed since the previous check.",
+    )

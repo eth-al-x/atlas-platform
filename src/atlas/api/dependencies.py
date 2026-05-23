@@ -20,11 +20,12 @@ from __future__ import annotations
 
 from atlas.core.config import AtlasConfig, get_config
 from atlas.core.pipeline import AnalysisPipeline
-from atlas.storage.db import ScanRepository
+from atlas.storage.db import ScanRepository, WatchRepository
 
 # Module-level singletons — initialized once at startup via lifespan
 _pipeline: AnalysisPipeline | None = None
 _repo: ScanRepository | None = None
+_watch_repo: WatchRepository | None = None
 _config: AtlasConfig | None = None
 
 
@@ -33,9 +34,10 @@ def init_dependencies() -> None:
     Initialize shared resources. Called once during API startup
     via the lifespan context manager in main.py.
     """
-    global _pipeline, _repo, _config
+    global _pipeline, _repo, _watch_repo, _config
     _config = get_config()
     _repo = ScanRepository()
+    _watch_repo = WatchRepository()
     _pipeline = AnalysisPipeline(config=_config)
 
 
@@ -51,6 +53,13 @@ def get_repo() -> ScanRepository:
     if _repo is None:
         raise RuntimeError("Repository not initialized. Call init_dependencies() first.")
     return _repo
+
+
+def get_watch_repo() -> WatchRepository:
+    """FastAPI dependency: returns the shared watch repository."""
+    if _watch_repo is None:
+        raise RuntimeError("Watch repository not initialized. Call init_dependencies() first.")
+    return _watch_repo
 
 
 def get_atlas_config() -> AtlasConfig:

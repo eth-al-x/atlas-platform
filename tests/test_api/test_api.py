@@ -141,10 +141,12 @@ class TestHealth:
         assert data["version"] == "2.0.0"
         assert data["tiers_loaded"] == 5
 
-    def test_root_redirects_to_docs(self, client):
+    def test_root_redirects(self, client):
+        """Root redirects to the dashboard if it's available, /docs otherwise."""
         response = client.get("/", follow_redirects=False)
         assert response.status_code in (301, 302, 307, 308)
-        assert "/docs" in response.headers["location"]
+        location = response.headers["location"]
+        assert location in ("/dashboard", "/docs")
 
 
 class TestStats:

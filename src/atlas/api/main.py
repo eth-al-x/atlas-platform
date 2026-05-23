@@ -22,9 +22,11 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from atlas.api.dependencies import init_dependencies
 from atlas.api.routes.scan import router as scan_router
@@ -32,8 +34,14 @@ from atlas.api.routes.recon import router as recon_router
 from atlas.api.routes.recon import investigate_router
 from atlas.api.routes.stats import router as stats_router
 from atlas.api.routes.correlate import router as correlate_router
+from atlas.api.routes.watches import router as watches_router
 
 logger = logging.getLogger(__name__)
+
+
+# Resolve the static directory at import time relative to this file so the
+# dashboard works regardless of the process's working directory.
+_STATIC_DIR = Path(__file__).parent / "static"
 
 
 @asynccontextmanager
@@ -98,12 +106,30 @@ def create_app() -> FastAPI:
     app.include_router(investigate_router, prefix="/api/v1")
     app.include_router(correlate_router, prefix="/api/v1")
     app.include_router(stats_router, prefix="/api/v1")
+    app.include_router(watches_router, prefix="/api/v1")
+
+    # ── Dashboard (static files) ──────────────────────────────
+    # The dashboard is a single-page app served as plain static files.
+    # We mount it at /dashboard so /api/* and /docs remain unaffected.
+    if _STATIC_DIR.exists():
+        app.mount(
+            "/dashboard",
+            StaticFiles(directory=str(_STATIC_DIR), html=True),
+            name="dashboard",
+        )
+    else:
+        logger.warning(
+            "Dashboard static directory not found at %s. The /dashboard "
+            "route will be unavailable.", _STATIC_DIR,
+        )
 
     # ── Root redirect ─────────────────────────────────────────
     @app.get("/", include_in_schema=False)
     async def root():
         from fastapi.responses import RedirectResponse
-        return RedirectResponse(url="/docs")
+        # Prefer the dashboard if it's available; fall back to API docs
+        target = "/dashboard" if _STATIC_DIR.exists() else "/docs"
+        return RedirectResponse(url=target)
 
     return app
 

@@ -122,3 +122,32 @@ async def get_scan(
         raise HTTPException(status_code=404, detail=f"Scan {scan_id} not found.")
 
     return ScanResponse(scan=report)
+
+
+@router.get(
+    "s/{scan_id}/recon",
+    summary="Get stored recon for a scan",
+    description=(
+        "Return the recon results that were captured for this scan, "
+        "keyed by recon type (dns, whois, ip_intel, etc.). Empty if the "
+        "scan was created without recon (e.g. POST /scan rather than "
+        "POST /investigate)."
+    ),
+)
+async def get_scan_recon(
+    scan_id: int,
+    repo: ScanRepository = Depends(get_repo),
+) -> dict:
+    """Retrieve stored recon results for a scan, keyed by recon type."""
+    loop = asyncio.get_event_loop()
+    report = await loop.run_in_executor(None, partial(repo.get_scan, scan_id))
+    if report is None:
+        raise HTTPException(status_code=404, detail=f"Scan {scan_id} not found.")
+
+    recon = await loop.run_in_executor(
+        None, partial(repo.get_recon_results, scan_id),
+    )
+    return {
+        name: result.model_dump(mode="json")
+        for name, result in recon.items()
+    }
