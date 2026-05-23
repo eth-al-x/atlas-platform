@@ -35,19 +35,23 @@ def _determine_verdict(results: list[TierResult]) -> Verdict:
 
     Rules:
         - Any tier with confidence >= 0.8 and flagged → High Risk
-        - Any tier flagged → at least Medium Risk
+        - Any tier with confidence >= 0.4 and flagged → Medium Risk
+        - Any tier flagged with confidence < 0.4 → Low Risk
         - No flags → Clean
     """
     if not results:
         return Verdict.CLEAN
 
     high_confidence_flags = [r for r in results if r.flagged and r.confidence >= 0.8]
+    medium_confidence_flags = [r for r in results if r.flagged and r.confidence >= 0.4]
     any_flags = [r for r in results if r.flagged]
 
     if high_confidence_flags:
         return Verdict.HIGH_RISK
-    if any_flags:
+    if medium_confidence_flags:
         return Verdict.MEDIUM_RISK
+    if any_flags:
+        return Verdict.LOW_RISK
     return Verdict.CLEAN
 
 

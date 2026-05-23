@@ -51,11 +51,38 @@ CREATE TABLE IF NOT EXISTS correlations (
     duration_ms INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS recon_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_id INTEGER NOT NULL REFERENCES scans(id),
+    recon_type TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    data JSON,
+    error TEXT,
+    performed_at TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_scans_domain ON scans(domain);
 CREATE INDEX IF NOT EXISTS idx_scans_verdict ON scans(final_verdict);
 CREATE INDEX IF NOT EXISTS idx_scans_scanned_at ON scans(scanned_at);
 CREATE INDEX IF NOT EXISTS idx_tier_scan ON tier_results(scan_id);
 CREATE INDEX IF NOT EXISTS idx_correlation_scan ON correlations(scan_id);
+CREATE INDEX IF NOT EXISTS idx_recon_scan ON recon_results(scan_id);
+CREATE INDEX IF NOT EXISTS idx_recon_type ON recon_results(recon_type);
+
+CREATE TABLE IF NOT EXISTS watches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    domain TEXT NOT NULL UNIQUE,
+    url TEXT NOT NULL,
+    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_checked_at TIMESTAMP,
+    last_verdict TEXT,
+    last_scan_id INTEGER REFERENCES scans(id),
+    active BOOLEAN DEFAULT 1,
+    check_count INTEGER DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_watches_active ON watches(active);
+CREATE INDEX IF NOT EXISTS idx_watches_domain ON watches(domain);
 """
 
 
@@ -138,6 +165,141 @@ class ScanRepository:
             conn.commit()
         finally:
             conn.close()
+
+    def save_recon_results(self, scan_id: int, recon: dict[str, "ReconResult"]) -> None:
+        """Persist recon results for an existing scan."""
+        from atlas.core.models import ReconResult  # avoid circular at module level
+
+        conn = self._conn()
+        try:
+            for name, rr in recon.items():
+                conn.execute(
+                    "INSERT INTO recon_results "
+                    "(scan_id, recon_type, domain, data, error, performed_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (scan_id, rr.recon_type, rr.domain,
+                     json.dumps(rr.data), rr.error,
+                     rr.performed_at.isoformat() if rr.performed_at else None),
+                )
+            conn.commit()
+            logger.debug("Saved %d recon results for scan %d", len(recon), scan_id)
+        finally:
+            conn.close()
+
+    def get_recon_results(self, scan_id: int) -> dict[str, "ReconResult"]:
+        """Retrieve recon results for a scan, keyed by recon_type."""
+        from atlas.core.models import ReconResult
+
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM recon_results WHERE scan_id = ? ORDER BY id",
+                (scan_id,),
+            ).fetchall()
+            results: dict[str, ReconResult] = {}
+            for row in rows:
+                rr = ReconResult(
+                    recon_type=row["recon_type"],
+                    domain=row["domain"],
+                    data=json.loads(row["data"]) if row["data"] else {},
+                    error=row["error"],
+                )
+                if row["performed_at"]:
+                    from datetime import datetime
+                    try:
+                        rr.performed_at = datetime.fromisoformat(row["performed_at"])
+                    except (ValueError, TypeError):
+                        pass
+                results[row["recon_type"]] = rr
+            return results
+        finally:
+            conn.close()
+
+    def find_related_scans(
+        self,
+        exclude_scan_id: int,
+        ip: str | None = None,
+        asn: str | None = None,
+        registrar: str | None = None,
+        limit_per_category: int = 10,
+    ) -> dict[str, list[dict]]:
+        """
+        Find scans that share infrastructure attributes with a given scan.
+
+        Uses SQLite's JSON1 extension to query inside the stored recon_results
+        JSON without needing a normalized schema. Each match category returns
+        up to `limit_per_category` results, ordered by recency.
+
+        Returns a dict keyed by attribute name ('ip', 'asn', 'registrar'), each
+        mapping to a list of matched scans with their domain, verdict, and
+        scan date for display.
+        """
+        related: dict[str, list[dict]] = {"ip": [], "asn": [], "registrar": []}
+        conn = self._conn()
+        try:
+            if ip:
+                related["ip"] = self._match_recon(
+                    conn,
+                    recon_type="ip_intel",
+                    json_path="$.ip",
+                    value=ip,
+                    exclude_scan_id=exclude_scan_id,
+                    limit=limit_per_category,
+                )
+            if asn:
+                related["asn"] = self._match_recon(
+                    conn,
+                    recon_type="ip_intel",
+                    json_path="$.geolocation.asn",
+                    value=asn,
+                    exclude_scan_id=exclude_scan_id,
+                    limit=limit_per_category,
+                )
+            if registrar:
+                related["registrar"] = self._match_recon(
+                    conn,
+                    recon_type="whois",
+                    json_path="$.registrar",
+                    value=registrar,
+                    exclude_scan_id=exclude_scan_id,
+                    limit=limit_per_category,
+                )
+            return related
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _match_recon(
+        conn: sqlite3.Connection,
+        *,
+        recon_type: str,
+        json_path: str,
+        value: str,
+        exclude_scan_id: int,
+        limit: int,
+    ) -> list[dict]:
+        """
+        Join recon_results → scans to find scans whose recon data has a
+        JSON field matching the given value. Returns enriched rows.
+        """
+        rows = conn.execute(
+            """
+            SELECT s.id          AS scan_id,
+                   s.domain      AS domain,
+                   s.url         AS url,
+                   s.final_verdict AS verdict,
+                   s.scanned_at  AS scanned_at
+            FROM recon_results r
+            JOIN scans s ON s.id = r.scan_id
+            WHERE r.recon_type = ?
+              AND json_extract(r.data, ?) = ?
+              AND r.scan_id != ?
+            ORDER BY s.scanned_at DESC
+            LIMIT ?
+            """,
+            (recon_type, json_path, value, exclude_scan_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_correlations(self, scan_id: int) -> list[CorrelationResult]:
         """Retrieve correlation results for a scan."""
@@ -241,6 +403,10 @@ class ScanRepository:
                 "SELECT COUNT(*) FROM scans WHERE final_verdict = ?",
                 (Verdict.CLEAN.value,)
             ).fetchone()[0]
+            low = conn.execute(
+                "SELECT COUNT(*) FROM scans WHERE final_verdict = ?",
+                (Verdict.LOW_RISK.value,)
+            ).fetchone()[0]
             recent = conn.execute(
                 "SELECT COUNT(*) FROM scans "
                 "WHERE scanned_at > datetime('now', '-1 day')"
@@ -257,9 +423,172 @@ class ScanRepository:
                 total_scans=total,
                 high_risk=high,
                 medium_risk=medium,
+                low_risk=low,
                 clean=clean,
                 scans_last_24h=recent,
                 top_flagged_domains=[dict(row) for row in top],
             )
         finally:
             conn.close()
+
+
+class WatchRepository:
+    """Query interface for the watch list — domains registered for ongoing monitoring."""
+
+    def __init__(self, db_path: str | None = None) -> None:
+        self.db_path = db_path or get_config().storage.database_path
+        initialize_db(self.db_path)
+
+    def _conn(self) -> sqlite3.Connection:
+        return get_connection(self.db_path)
+
+    def add_watch(self, domain: str, url: str) -> "WatchEntry":
+        """
+        Register a domain for monitoring.
+
+        Idempotent: if the domain already exists, re-activates it (in case it
+        was previously removed) and returns the updated entry.
+        """
+        from atlas.core.models import WatchEntry
+
+        conn = self._conn()
+        try:
+            existing = conn.execute(
+                "SELECT * FROM watches WHERE domain = ?", (domain,)
+            ).fetchone()
+
+            if existing:
+                # Re-activate if it was deactivated
+                conn.execute(
+                    "UPDATE watches SET active = 1, url = ? WHERE domain = ?",
+                    (url, domain),
+                )
+                conn.commit()
+                row = conn.execute(
+                    "SELECT * FROM watches WHERE domain = ?", (domain,)
+                ).fetchone()
+            else:
+                cursor = conn.execute(
+                    "INSERT INTO watches (domain, url, active) VALUES (?, ?, 1)",
+                    (domain, url),
+                )
+                conn.commit()
+                row = conn.execute(
+                    "SELECT * FROM watches WHERE id = ?", (cursor.lastrowid,)
+                ).fetchone()
+
+            return self._row_to_entry(row)
+        finally:
+            conn.close()
+
+    def list_watches(self, active_only: bool = False) -> list["WatchEntry"]:
+        """Return all watch entries, optionally filtered to active only."""
+        from atlas.core.models import WatchEntry
+
+        conn = self._conn()
+        try:
+            if active_only:
+                rows = conn.execute(
+                    "SELECT * FROM watches WHERE active = 1 ORDER BY added_at ASC"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM watches ORDER BY added_at ASC"
+                ).fetchall()
+            return [self._row_to_entry(r) for r in rows]
+        finally:
+            conn.close()
+
+    def get_watch(self, watch_id: int) -> "WatchEntry | None":
+        """Retrieve a single watch entry by id."""
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM watches WHERE id = ?", (watch_id,)
+            ).fetchone()
+            return self._row_to_entry(row) if row else None
+        finally:
+            conn.close()
+
+    def get_watch_by_domain(self, domain: str) -> "WatchEntry | None":
+        """Retrieve a watch entry by domain name."""
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM watches WHERE domain = ?", (domain,)
+            ).fetchone()
+            return self._row_to_entry(row) if row else None
+        finally:
+            conn.close()
+
+    def remove_watch(self, watch_id: int) -> bool:
+        """
+        Deactivate a watch (soft delete — keeps history).
+        Returns True if a record was found and deactivated, False if not found.
+        """
+        conn = self._conn()
+        try:
+            cursor = conn.execute(
+                "UPDATE watches SET active = 0 WHERE id = ? AND active = 1",
+                (watch_id,),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+    def update_after_check(
+        self,
+        watch_id: int,
+        verdict: str,
+        scan_id: int,
+    ) -> None:
+        """
+        Record the outcome of a monitoring check.
+        Called once per watch per `atlas watch run` invocation.
+        """
+        conn = self._conn()
+        try:
+            conn.execute(
+                """
+                UPDATE watches
+                SET last_checked_at = datetime('now'),
+                    last_verdict = ?,
+                    last_scan_id = ?,
+                    check_count = check_count + 1
+                WHERE id = ?
+                """,
+                (verdict, scan_id, watch_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    # ── Private helpers ───────────────────────────────────────
+
+    @staticmethod
+    def _row_to_entry(row: sqlite3.Row) -> "WatchEntry":
+        from atlas.core.models import WatchEntry
+        from datetime import datetime
+
+        def _parse_dt(val: str | None) -> "datetime | None":
+            if not val:
+                return None
+            try:
+                return datetime.fromisoformat(val)
+            except (ValueError, TypeError):
+                return None
+
+        return WatchEntry(
+            id=row["id"],
+            domain=row["domain"],
+            url=row["url"],
+            added_at=_parse_dt(row["added_at"]) or __import__("datetime").datetime.now(
+                __import__("datetime").timezone.utc
+            ),
+            last_checked_at=_parse_dt(row["last_checked_at"]),
+            last_verdict=row["last_verdict"],
+            last_scan_id=row["last_scan_id"],
+            active=bool(row["active"]),
+            check_count=row["check_count"] or 0,
+        )

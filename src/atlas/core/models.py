@@ -128,6 +128,87 @@ class ScanStats(BaseModel):
     total_scans: int = 0
     high_risk: int = 0
     medium_risk: int = 0
+    low_risk: int = 0
     clean: int = 0
     top_flagged_domains: list[dict[str, Any]] = Field(default_factory=list)
     scans_last_24h: int = 0
+
+
+# ── Watch Models ─────────────────────────────────────────────
+
+
+# Severity order for comparing verdicts (higher = worse)
+VERDICT_SEVERITY: dict[str, int] = {
+    Verdict.CLEAN.value:       0,
+    Verdict.LOW_RISK.value:    1,
+    Verdict.MEDIUM_RISK.value: 2,
+    Verdict.HIGH_RISK.value:   3,
+}
+
+
+class WatchEntry(BaseModel):
+    """A domain registered for periodic verdict monitoring."""
+    id: int | None = None
+    domain: str
+    url: str
+    added_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_checked_at: datetime | None = None
+    last_verdict: str | None = None       # Verdict.value or None (never checked)
+    last_scan_id: int | None = None
+    active: bool = True
+    check_count: int = 0
+
+
+class WatchAlert(BaseModel):
+    """
+    The result of checking a single watch entry.
+
+    Produced after every `atlas watch run` check — whether or not the
+    verdict changed. Consumers can filter by `changed` for alert-only views.
+    """
+    watch_id: int
+    domain: str
+    url: str
+    previous_verdict: str | None   # None on the first ever check
+    new_verdict: str
+    scan_id: int
+    changed: bool
+    is_new: bool                   # True when this is the first check
+    direction: str                 # "new" | "escalated" | "de-escalated" | "unchanged"
+
+    @classmethod
+    def build(
+        cls,
+        watch: WatchEntry,
+        new_verdict: Verdict,
+        scan_id: int,
+    ) -> "WatchAlert":
+        """
+        Construct a WatchAlert by comparing a new verdict to the stored one.
+        """
+        previous = watch.last_verdict
+        is_new = previous is None
+        new_val = new_verdict.value
+        changed = (previous != new_val)
+
+        if is_new:
+            direction = "new"
+            changed = False   # first check: nothing "changed", there was no prior state
+        elif not changed:
+            direction = "unchanged"
+        else:
+            prev_sev = VERDICT_SEVERITY.get(previous or "", 0)
+            new_sev = VERDICT_SEVERITY.get(new_val, 0)
+            direction = "escalated" if new_sev > prev_sev else "de-escalated"
+
+        return cls(
+            watch_id=watch.id or 0,
+            domain=watch.domain,
+            url=watch.url,
+            previous_verdict=previous,
+            new_verdict=new_val,
+            scan_id=scan_id,
+            changed=changed,
+            is_new=is_new,
+            direction=direction,
+        )

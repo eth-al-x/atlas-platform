@@ -298,7 +298,7 @@ async def investigate(
     from atlas.correlate.pipeline import CorrelationPipeline
     from atlas.core.models import CorrelationContext
 
-    correlation_pipeline = CorrelationPipeline(config=pipeline.config)
+    correlation_pipeline = CorrelationPipeline(config=pipeline.config, repo=repo)
     context = CorrelationContext(scan=report, recon=recon_results)
     correlations = await loop.run_in_executor(
         None,
@@ -306,6 +306,7 @@ async def investigate(
     )
     report.correlations = correlations
     repo.save_correlations(scan_id, correlations)
+    repo.save_recon_results(scan_id, recon_results)
 
     return InvestigateResponse(
         scan=report,

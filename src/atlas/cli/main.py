@@ -12,6 +12,7 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from pathlib import Path
@@ -124,10 +125,26 @@ def scan(
     file: Path = typer.Option(None, "--file", "-f", help="Text file with one URL per line"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed tier output"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress all output except verdict"),
+    output: str = typer.Option(
+        "terminal", "--output", "-o",
+        help="Output format: terminal (default), json, or csv",
+    ),
 ) -> None:
     """Analyze one or more URLs through the tiered security pipeline."""
+    from atlas.core.export import (
+        OUTPUT_FORMATS, report_to_json, reports_to_csv,
+    )
+    if output not in OUTPUT_FORMATS:
+        console.print(f"[red]Invalid --output: {output!r}. Use one of: {', '.join(OUTPUT_FORMATS)}[/red]")
+        raise typer.Exit(2)
+    structured = output != "terminal"
+
     # Configure logging based on verbosity — silence noisy libraries
-    log_level = logging.DEBUG if verbose else (logging.WARNING if quiet else logging.INFO)
+    # Structured output forces silent logging so JSON/CSV stays parseable.
+    if structured:
+        log_level = logging.WARNING
+    else:
+        log_level = logging.DEBUG if verbose else (logging.WARNING if quiet else logging.INFO)
     logging.basicConfig(level=log_level, format="%(message)s")
     for noisy in ("httpx", "httpcore", "urllib3", "whois"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
@@ -148,6 +165,9 @@ def scan(
     elif url:
         urls = [url]
     else:
+        if structured:
+            console.print("[red]Interactive mode is not available with --output json/csv.[/red]")
+            raise typer.Exit(2)
         # Interactive mode
         console.print("[bold blue]ATLAS[/bold blue] — Interactive Mode")
         console.print("Enter a URL to scan, or [bold]quit[/bold] to exit.\n")
@@ -169,11 +189,20 @@ def scan(
     # Single or batch mode
     source = ScanSource.BATCH if file else ScanSource.CLI
 
+    # Collect reports — print or emit at the end based on output format
+    collected_reports: list[ScanReport] = []
+
     for target_url in urls:
         request = ScanRequest(url=target_url, source=source)
         report = pipeline.analyze(request)
         scan_id = repo.save_scan(report)
         report.id = scan_id
+        collected_reports.append(report)
+
+        if structured:
+            # Defer all output until the end so we can produce a single
+            # well-formed JSON document or CSV stream.
+            continue
 
         if quiet:
             icon, _ = _verdict_style(report.final_verdict)
@@ -181,15 +210,43 @@ def scan(
         else:
             _print_report(report, verbose=verbose)
 
+    # ── Structured emission ───────────────────────────────────
+    if output == "json":
+        if len(collected_reports) == 1:
+            typer.echo(report_to_json(collected_reports[0]))
+        else:
+            from atlas.core.export import reports_to_json
+            typer.echo(reports_to_json(collected_reports))
+    elif output == "csv":
+        typer.echo(reports_to_csv(collected_reports), nl=False)
+
 
 @app.command()
 def history(
     limit: int = typer.Option(20, "--limit", "-n", help="Number of results"),
+    output: str = typer.Option(
+        "terminal", "--output", "-o",
+        help="Output format: terminal (default), json, or csv",
+    ),
 ) -> None:
     """Show recent scan history."""
+    from atlas.core.export import OUTPUT_FORMATS, history_to_csv
+
+    if output not in OUTPUT_FORMATS:
+        console.print(f"[red]Invalid --output: {output!r}. Use one of: {', '.join(OUTPUT_FORMATS)}[/red]")
+        raise typer.Exit(2)
+
     logging.basicConfig(level=logging.WARNING)
     repo = _get_repo()
     scans = repo.list_scans(limit=limit)
+
+    # Structured output: dump and return
+    if output == "json":
+        typer.echo(json.dumps(scans, indent=2, default=str))
+        return
+    if output == "csv":
+        typer.echo(history_to_csv(scans), nl=False)
+        return
 
     if not scans:
         console.print("[dim]No scans recorded yet.[/dim]")
@@ -204,7 +261,7 @@ def history(
 
     for s in scans:
         verdict = s["final_verdict"]
-        style = "red" if verdict == "High Risk" else ("yellow" if verdict == "Medium Risk" else "green")
+        style = "red" if verdict == "High Risk" else ("yellow" if verdict == "Medium Risk" else ("dim yellow" if verdict == "Low Risk" else "green"))
         table.add_row(
             str(s["id"]),
             s["url"][:50],
@@ -217,11 +274,29 @@ def history(
 
 
 @app.command()
-def stats() -> None:
+def stats(
+    output: str = typer.Option(
+        "terminal", "--output", "-o",
+        help="Output format: terminal (default), json, or csv",
+    ),
+) -> None:
     """Show aggregate scan statistics."""
+    from atlas.core.export import OUTPUT_FORMATS, stats_to_csv, stats_to_json
+
+    if output not in OUTPUT_FORMATS:
+        console.print(f"[red]Invalid --output: {output!r}. Use one of: {', '.join(OUTPUT_FORMATS)}[/red]")
+        raise typer.Exit(2)
+
     logging.basicConfig(level=logging.WARNING)
     repo = _get_repo()
     s = repo.get_stats()
+
+    if output == "json":
+        typer.echo(stats_to_json(s))
+        return
+    if output == "csv":
+        typer.echo(stats_to_csv(s), nl=False)
+        return
 
     table = Table(title="ATLAS Statistics", show_header=False, box=None)
     table.add_column("Metric", style="bold")
@@ -230,6 +305,7 @@ def stats() -> None:
     table.add_row("Total scans", str(s.total_scans))
     table.add_row("High Risk", f"[red]{s.high_risk}[/red]")
     table.add_row("Medium Risk", f"[yellow]{s.medium_risk}[/yellow]")
+    table.add_row("Low Risk", f"[dim yellow]{s.low_risk}[/dim yellow]")
     table.add_row("Clean", f"[green]{s.clean}[/green]")
     table.add_row("Scans (last 24h)", str(s.scans_last_24h))
 
@@ -832,6 +908,10 @@ def investigate(
                                    help="Skip slow tools (urlscan.io adds ~30s)"),
     with_subdomains: bool = typer.Option(False, "--with-subdomains",
                                           help="Also run active subdomain enumeration (~15s)"),
+    output: str = typer.Option(
+        "terminal", "--output", "-o",
+        help="Output format: terminal (default), json, or csv",
+    ),
 ) -> None:
     """
     Run all recon tools plus the threat analysis pipeline on a target.
@@ -841,6 +921,13 @@ def investigate(
     headers, web content, urlscan sandbox analysis, and the tiered
     threat verdict.
     """
+    from atlas.core.export import OUTPUT_FORMATS, report_to_csv, report_to_json
+
+    if output not in OUTPUT_FORMATS:
+        console.print(f"[red]Invalid --output: {output!r}. Use one of: {', '.join(OUTPUT_FORMATS)}[/red]")
+        raise typer.Exit(2)
+    structured = output != "terminal"
+
     logging.basicConfig(level=logging.WARNING)
     for noisy in ("httpx", "httpcore", "urllib3", "whois", "dns"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
@@ -865,6 +952,12 @@ def investigate(
 
     # Active-recon ack check happens once, before the investigation starts,
     # so the warning doesn't interrupt mid-flow.
+    if with_subdomains and structured:
+        console.print(
+            "[red]--with-subdomains is interactive; not available with --output json/csv.[/red]"
+        )
+        raise typer.Exit(2)
+
     if with_subdomains and not ensure_acknowledged():
         console.print()
         console.print(Panel(
@@ -885,23 +978,29 @@ def investigate(
         mark_acknowledged()
 
     # Header for the whole investigation
-    console.print()
-    console.print(Panel(
-        Text(f"🔬 Investigating: {clean_domain}", style="bold blue"),
-        border_style="blue",
-    ))
-    console.print()
+    if not structured:
+        console.print()
+        console.print(Panel(
+            Text(f"🔬 Investigating: {clean_domain}", style="bold blue"),
+            border_style="blue",
+        ))
+        console.print()
 
     # ── Threat verdict (unless skipped) ──────────────────────
+    # report and scan_id may be None if skip_scan is set
+    report = None
+    scan_id = None
+    repo = _get_repo()
     if not skip_scan:
-        console.print("[bold cyan]━━━ Threat Analysis ━━━[/bold cyan]\n")
+        if not structured:
+            console.print("[bold cyan]━━━ Threat Analysis ━━━[/bold cyan]\n")
         pipeline = _get_pipeline()
-        repo = _get_repo()
         request = ScanRequest(url=full_url, source=ScanSource.CLI)
         report = pipeline.analyze(request)
         scan_id = repo.save_scan(report)
         report.id = scan_id
-        _print_report(report)
+        if not structured:
+            _print_report(report)
 
     # ── Recon tools in sequence ──────────────────────────────
     tools = [
@@ -932,10 +1031,11 @@ def investigate(
         if is_slow and skip_slow:
             continue
 
-        console.print(f"\n[bold cyan]{section_header}[/bold cyan]\n")
+        if not structured:
+            console.print(f"\n[bold cyan]{section_header}[/bold cyan]\n")
 
-        # Wrap slow tools in a progress spinner
-        if is_slow:
+        # Wrap slow tools in a progress spinner (only meaningful in terminal mode)
+        if is_slow and not structured:
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),
@@ -951,24 +1051,57 @@ def investigate(
             result = tool.run(target_input)
 
         recon_results[tool.name] = result
-        _print_recon_result(result, render_title)
+        if not structured:
+            _print_recon_result(result, render_title)
 
     # ── Correlations ─────────────────────────────────────────
-    console.print(f"\n[bold cyan]━━━ Correlations ━━━[/bold cyan]\n")
+    if not structured:
+        console.print(f"\n[bold cyan]━━━ Correlations ━━━[/bold cyan]\n")
     from atlas.correlate.pipeline import CorrelationPipeline
     from atlas.core.models import CorrelationContext
 
-    correlation_pipeline = CorrelationPipeline(config=config)
-    context = CorrelationContext(scan=report, recon=recon_results)
-    correlations = correlation_pipeline.correlate(context)
+    correlations: list = []
+    if report is not None:
+        correlation_pipeline = CorrelationPipeline(config=config, repo=repo)
+        context = CorrelationContext(scan=report, recon=recon_results)
+        correlations = correlation_pipeline.correlate(context)
 
-    # Attach + persist correlations against this scan
-    report.correlations = correlations
-    if scan_id:
-        repo.save_correlations(scan_id, correlations)
+        # Attach + persist correlations against this scan
+        report.correlations = correlations
+        if scan_id:
+            repo.save_recon_results(scan_id, recon_results)
+            repo.save_correlations(scan_id, correlations)
 
-    for cr in correlations:
-        _print_correlation(cr)
+    if not structured:
+        for cr in correlations:
+            _print_correlation(cr)
+        return
+
+    # ── Structured emission ───────────────────────────────────
+    # If --skip-scan was used we may not have a scan report; build a minimal
+    # report-shaped payload so JSON/CSV output is still well-formed.
+    if report is None:
+        # No scan was run — emit just the recon data
+        payload = {
+            "scan": None,
+            "recon": {name: r.model_dump(mode="json") for name, r in recon_results.items()},
+            "correlations": [],
+        }
+        if output == "json":
+            typer.echo(json.dumps(payload, indent=2, default=str))
+        elif output == "csv":
+            # No scan summary available; emit empty CSV with just the header
+            from atlas.core.export import SCAN_CSV_COLUMNS
+            import csv as _csv, io as _io
+            buf = _io.StringIO()
+            _csv.DictWriter(buf, fieldnames=SCAN_CSV_COLUMNS).writeheader()
+            typer.echo(buf.getvalue(), nl=False)
+        return
+
+    if output == "json":
+        typer.echo(report_to_json(report, recon=recon_results, correlations=correlations))
+    elif output == "csv":
+        typer.echo(report_to_csv(report, correlations=correlations), nl=False)
 
 
 def _print_correlation(cr) -> None:
@@ -994,6 +1127,21 @@ def _print_correlation(cr) -> None:
                 body += f"  • [cyan]{f.get('date', '')[:10]}[/cyan] — {f.get('event', '')}\n"
             elif cr.correlator_name == "mitre":
                 body += f"  • [magenta]{f.get('technique_id')}[/magenta] {f.get('name')} ([dim]{f.get('tactic')}[/dim])\n"
+            elif cr.correlator_name == "cross_scan":
+                verdict = f.get("verdict", "?")
+                v_color = (
+                    "red" if verdict == "High Risk"
+                    else "yellow" if verdict == "Medium Risk"
+                    else "dim yellow" if verdict == "Low Risk"
+                    else "green"
+                )
+                infra_hint = " [dim](common infra)[/dim]" if f.get("is_common_infra") else ""
+                body += (
+                    f"  • [cyan]{f.get('label')}[/cyan] "
+                    f"[bold]{f.get('domain')}[/bold] "
+                    f"([{v_color}]{verdict}[/{v_color}]) "
+                    f"— {f.get('matched_value')}{infra_hint}\n"
+                )
         if len(cr.findings) > 10:
             body += f"  [dim]...and {len(cr.findings) - 10} more[/dim]\n"
 
@@ -1013,6 +1161,10 @@ def _print_correlation(cr) -> None:
 @app.command()
 def correlate(
     scan_id: int = typer.Argument(..., help="Scan ID to re-correlate."),
+    output: str = typer.Option(
+        "terminal", "--output", "-o",
+        help="Output format: terminal (default), json, or csv",
+    ),
 ) -> None:
     """
     Run correlators against an existing scan (without re-running tiers/recon).
@@ -1021,10 +1173,19 @@ def correlate(
     inspecting what synthesis a scan produces without re-paying the cost
     of fresh recon.
     """
+    from atlas.core.export import OUTPUT_FORMATS, report_to_csv, report_to_json
+
+    if output not in OUTPUT_FORMATS:
+        console.print(f"[red]Invalid --output: {output!r}. Use one of: {', '.join(OUTPUT_FORMATS)}[/red]")
+        raise typer.Exit(2)
+
     repo = _get_repo()
     report = repo.get_scan(scan_id)
     if not report:
-        console.print(f"[bold red]Scan {scan_id} not found.[/bold red]")
+        if output == "terminal":
+            console.print(f"[bold red]Scan {scan_id} not found.[/bold red]")
+        else:
+            typer.echo(json.dumps({"error": f"Scan {scan_id} not found"}))
         raise typer.Exit(1)
 
     # Without stored recon data we can only correlate against tier results
@@ -1032,12 +1193,22 @@ def correlate(
     from atlas.core.models import CorrelationContext
 
     config = get_config()
-    pipeline = CorrelationPipeline(config=config)
-    context = CorrelationContext(scan=report, recon={})
+    pipeline = CorrelationPipeline(config=config, repo=repo)
+
+    # Load stored recon data if available — enables full correlations
+    stored_recon = repo.get_recon_results(scan_id)
+    context = CorrelationContext(scan=report, recon=stored_recon)
     correlations = pipeline.correlate(context)
 
     report.correlations = correlations
     repo.save_correlations(scan_id, correlations)
+
+    if output == "json":
+        typer.echo(report_to_json(report, recon=stored_recon, correlations=correlations))
+        return
+    if output == "csv":
+        typer.echo(report_to_csv(report, correlations=correlations), nl=False)
+        return
 
     console.print(f"\n[bold]Correlations for scan #{scan_id}[/bold] — {report.url}\n")
     for cr in correlations:
@@ -1094,6 +1265,301 @@ def serve(
         reload=reload,
         workers=workers if not reload else 1,  # workers > 1 incompatible with reload
         log_level="info",
+    )
+
+
+# ── Entry point ───────────────────────────────────────────────
+
+# ── Watch subcommand group ────────────────────────────────────
+
+_watch_repo: "WatchRepository | None" = None  # type: ignore[name-defined]
+
+
+def _get_watch_repo() -> "WatchRepository":  # type: ignore[name-defined]
+    global _watch_repo
+    if _watch_repo is None:
+        from atlas.storage.db import WatchRepository
+        _watch_repo = WatchRepository()
+    return _watch_repo
+
+
+watch_app = typer.Typer(
+    name="watch",
+    help="Domain watch list — monitor domains for verdict changes.",
+    no_args_is_help=True,
+)
+app.add_typer(watch_app, name="watch")
+
+
+@watch_app.command("add")
+def watch_add(
+    target: str = typer.Argument(..., help="Domain or URL to watch (e.g. evil.com)"),
+) -> None:
+    """Register a domain for ongoing verdict monitoring."""
+    from atlas.core.domain import extract_domain, normalize_url
+
+    # Accept bare domains or full URLs; normalize both ways
+    domain = extract_domain(target) if "/" in target else target.lower().strip()
+    url = normalize_url(target if "/" in target else domain)
+
+    watch_repo = _get_watch_repo()
+    entry = watch_repo.add_watch(domain=domain, url=url)
+
+    if entry.check_count > 0:
+        # Was re-activated
+        console.print(
+            f"[green]Re-activated watch #{entry.id}[/green]: [bold]{domain}[/bold]"
+        )
+    else:
+        console.print(
+            f"[green]Now watching[/green]: [bold]{domain}[/bold]  "
+            f"([dim]id={entry.id}[/dim])\n"
+            f"  URL: {url}"
+        )
+
+
+@watch_app.command("list")
+def watch_list(
+    all_watches: bool = typer.Option(
+        False, "--all", "-a", help="Include removed (inactive) watches"
+    ),
+    output: str = typer.Option(
+        "terminal", "--output", "-o",
+        help="Output format: terminal (default), json, or csv",
+    ),
+) -> None:
+    """Show all watched domains and their last known verdicts."""
+    from atlas.core.export import OUTPUT_FORMATS
+    import csv as _csv, io as _io
+
+    if output not in OUTPUT_FORMATS:
+        console.print(f"[red]Invalid --output: {output!r}. Use: {', '.join(OUTPUT_FORMATS)}[/red]")
+        raise typer.Exit(2)
+
+    watch_repo = _get_watch_repo()
+    entries = watch_repo.list_watches(active_only=not all_watches)
+
+    if output == "json":
+        typer.echo(json.dumps(
+            [e.model_dump(mode="json") for e in entries],
+            indent=2, default=str,
+        ))
+        return
+
+    if output == "csv":
+        columns = ("id", "domain", "url", "active", "last_verdict",
+                   "last_checked_at", "check_count")
+        buf = _io.StringIO()
+        writer = _csv.DictWriter(buf, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        for e in entries:
+            writer.writerow({
+                "id": e.id, "domain": e.domain, "url": e.url,
+                "active": e.active, "last_verdict": e.last_verdict or "",
+                "last_checked_at": e.last_checked_at.isoformat() if e.last_checked_at else "",
+                "check_count": e.check_count,
+            })
+        typer.echo(buf.getvalue(), nl=False)
+        return
+
+    if not entries:
+        console.print("[dim]No domains being watched.[/dim]  "
+                      "Use [bold]atlas watch add <domain>[/bold] to add one.")
+        return
+
+    table = Table(
+        title="Watch List", show_header=True, header_style="bold cyan"
+    )
+    table.add_column("ID", min_width=4, justify="right")
+    table.add_column("Domain", min_width=20)
+    table.add_column("Status", min_width=8)
+    table.add_column("Last Verdict", min_width=12)
+    table.add_column("Last Checked", min_width=16)
+    table.add_column("Checks", min_width=6, justify="right")
+
+    for e in entries:
+        status = "[green]Active[/green]" if e.active else "[dim]Removed[/dim]"
+        if e.last_verdict:
+            icon, color = _verdict_style(
+                # Map string verdict back to the enum for styling
+                next((v for v in __import__("atlas.core.models", fromlist=["Verdict"]).Verdict
+                      if v.value == e.last_verdict), None) or
+                __import__("atlas.core.models", fromlist=["Verdict"]).Verdict.CLEAN
+            )
+            verdict_str = f"[{color}]{e.last_verdict}[/{color}]"
+        else:
+            verdict_str = "[dim](not yet run)[/dim]"
+
+        last_checked = (
+            e.last_checked_at.strftime("%Y-%m-%d %H:%M")
+            if e.last_checked_at else "—"
+        )
+
+        table.add_row(
+            str(e.id), e.domain, status,
+            verdict_str, last_checked, str(e.check_count),
+        )
+
+    console.print(table)
+
+
+@watch_app.command("remove")
+def watch_remove(
+    watch_id: int = typer.Argument(..., help="Watch ID to remove (from 'atlas watch list')"),
+) -> None:
+    """Stop monitoring a domain (soft delete — history is preserved)."""
+    watch_repo = _get_watch_repo()
+    entry = watch_repo.get_watch(watch_id)
+    if entry is None:
+        console.print(f"[red]Watch #{watch_id} not found.[/red]")
+        raise typer.Exit(1)
+    removed = watch_repo.remove_watch(watch_id)
+    if removed:
+        console.print(f"[dim]Removed watch #{watch_id}[/dim] ({entry.domain})")
+    else:
+        console.print(f"[yellow]Watch #{watch_id} was already inactive.[/yellow]")
+
+
+@watch_app.command("run")
+def watch_run(
+    skip_slow: bool = typer.Option(
+        True, "--skip-slow/--no-skip-slow",
+        help="Skip slow recon tools (urlscan.io). Default: skip.",
+    ),
+    output: str = typer.Option(
+        "terminal", "--output", "-o",
+        help="Output format: terminal (default), json, or csv",
+    ),
+    changed_only: bool = typer.Option(
+        False, "--changed-only", "-c",
+        help="In structured output, only emit entries where the verdict changed.",
+    ),
+) -> None:
+    """
+    Check all active watched domains for verdict changes.
+
+    Each domain is scanned through the analysis pipeline. When a verdict
+    changes since the last check, an alert is printed (or emitted to the
+    structured output). Updates last_verdict and last_checked_at for every
+    checked domain.
+
+    Designed to be called from cron or any scheduler:
+
+        # Check every hour
+        0 * * * * atlas watch run --output json >> /var/log/atlas-alerts.jsonl
+    """
+    from atlas.core.export import OUTPUT_FORMATS
+    from atlas.core.models import WatchAlert
+
+    if output not in OUTPUT_FORMATS:
+        console.print(f"[red]Invalid --output: {output!r}. Use: {', '.join(OUTPUT_FORMATS)}[/red]")
+        raise typer.Exit(2)
+    structured = output != "terminal"
+
+    logging.basicConfig(level=logging.WARNING)
+    for noisy in ("httpx", "httpcore", "urllib3", "whois", "dns"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    watch_repo = _get_watch_repo()
+    scan_repo = _get_repo()
+    pipeline = _get_pipeline()
+
+    entries = watch_repo.list_watches(active_only=True)
+
+    if not entries:
+        if not structured:
+            console.print("[dim]No active watches. Add one with[/dim] "
+                          "[bold]atlas watch add <domain>[/bold]")
+        else:
+            typer.echo("[]" if output == "json" else "")
+        return
+
+    if not structured:
+        console.print(f"\n[bold cyan]Checking {len(entries)} watched domain(s)...[/bold cyan]\n")
+
+    alerts: list[WatchAlert] = []
+
+    for entry in entries:
+        from atlas.core.models import ScanRequest, ScanSource, Verdict
+
+        request = ScanRequest(url=entry.url, source=ScanSource.CLI)
+        report = pipeline.analyze(request)
+        scan_id = scan_repo.save_scan(report)
+        report.id = scan_id
+
+        alert = WatchAlert.build(
+            watch=entry,
+            new_verdict=report.final_verdict,
+            scan_id=scan_id,
+        )
+        alerts.append(alert)
+        watch_repo.update_after_check(
+            watch_id=entry.id,
+            verdict=report.final_verdict.value,
+            scan_id=scan_id,
+        )
+
+        if not structured:
+            _print_watch_alert(alert)
+
+    if not structured:
+        changed = [a for a in alerts if a.changed]
+        if changed:
+            console.print(
+                f"\n[bold yellow]⚠  {len(changed)} verdict change(s) detected.[/bold yellow]"
+            )
+        else:
+            console.print("\n[dim]No verdict changes detected.[/dim]")
+        return
+
+    # ── Structured output ─────────────────────────────────────
+    emit = [a for a in alerts if a.changed or a.is_new] if changed_only else alerts
+
+    if output == "json":
+        typer.echo(json.dumps(
+            [a.model_dump(mode="json") for a in emit],
+            indent=2, default=str,
+        ))
+    elif output == "csv":
+        import csv as _csv, io as _io
+        columns = (
+            "watch_id", "domain", "url", "previous_verdict",
+            "new_verdict", "direction", "changed", "is_new", "scan_id",
+        )
+        buf = _io.StringIO()
+        writer = _csv.DictWriter(buf, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        for a in emit:
+            writer.writerow(a.model_dump(mode="json"))
+        typer.echo(buf.getvalue(), nl=False)
+
+
+def _print_watch_alert(alert: "WatchAlert") -> None:  # type: ignore[name-defined]
+    """Render a single watch alert line to the terminal."""
+    direction_icon = {
+        "new":           "🆕",
+        "escalated":     "🚨",
+        "de-escalated":  "✅",
+        "unchanged":     "  ",
+    }.get(alert.direction, "  ")
+
+    prev = alert.previous_verdict or "—"
+    new = alert.new_verdict
+    _, color = _verdict_style(
+        next((v for v in __import__("atlas.core.models", fromlist=["Verdict"]).Verdict
+              if v.value == new), None) or
+        __import__("atlas.core.models", fromlist=["Verdict"]).Verdict.CLEAN
+    )
+
+    if alert.direction in ("escalated", "de-escalated"):
+        change = f"[dim]{prev} →[/dim] [{color}]{new}[/{color}]"
+    elif alert.direction == "new":
+        change = f"[{color}]{new}[/{color}] [dim](first check)[/dim]"
+    else:
+        change = f"[{color}]{new}[/{color}]"
+
+    console.print(
+        f"  {direction_icon} [bold]{alert.domain:<35}[/bold] {change}"
     )
 
 

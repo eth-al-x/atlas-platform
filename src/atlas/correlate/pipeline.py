@@ -6,16 +6,22 @@ Correlators are pure synthesis — they don't talk to the network or hit
 external APIs (with extremely rare exceptions). This pipeline runs them
 sequentially since they're fast (~milliseconds each) and a thread pool
 would be overkill.
+
+The cross-scan correlator is the one exception to the "no I/O" rule — it
+queries the scan database for related infrastructure. It's only registered
+when a ScanRepository is provided; otherwise the pipeline runs only the
+pure correlators.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Sequence
+from typing import Any, Sequence
 
 from atlas.core.config import AtlasConfig, get_config
 from atlas.core.models import CorrelationContext, CorrelationResult
 from atlas.correlate.base import Correlator
+from atlas.correlate.cross_scan import CrossScanCorrelator
 from atlas.correlate.mitre import MitreCorrelator
 from atlas.correlate.risk_score import RiskScoreCorrelator
 from atlas.correlate.timeline import TimelineCorrelator
@@ -30,8 +36,10 @@ class CorrelationPipeline:
         self,
         config: AtlasConfig | None = None,
         correlators: Sequence[Correlator] | None = None,
+        repo: Any = None,
     ) -> None:
         self.config = config or get_config()
+        self.repo = repo
         self._correlators: list[Correlator] = list(correlators) if correlators else []
         if not self._correlators:
             self._setup_correlators()
@@ -43,6 +51,11 @@ class CorrelationPipeline:
             TimelineCorrelator(self.config),
             MitreCorrelator(self.config),
         ]
+        # Cross-scan correlation requires DB access — only register when a
+        # repo is available. Other contexts (tests, lightweight pipelines)
+        # simply skip it.
+        if self.repo is not None:
+            self._correlators.append(CrossScanCorrelator(self.config, self.repo))
 
     @property
     def correlator_names(self) -> list[str]:

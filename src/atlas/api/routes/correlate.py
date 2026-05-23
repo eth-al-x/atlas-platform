@@ -49,8 +49,13 @@ async def correlate_scan(
     if report is None:
         raise HTTPException(status_code=404, detail=f"Scan {scan_id} not found.")
 
-    pipeline = CorrelationPipeline(config=config)
-    context = CorrelationContext(scan=report, recon={})
+    pipeline = CorrelationPipeline(config=config, repo=repo)
+
+    # Load stored recon data if available — enables full correlations
+    stored_recon = await loop.run_in_executor(
+        None, partial(repo.get_recon_results, scan_id)
+    )
+    context = CorrelationContext(scan=report, recon=stored_recon)
 
     correlations = await loop.run_in_executor(
         None,
