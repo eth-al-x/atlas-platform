@@ -42,12 +42,32 @@ class ServerConfig(BaseModel):
     port: int = 8000
 
 
+class GreyNoiseConfig(BaseModel):
+    # Base URL for the Community API — override for Enterprise
+    community_url: str = "https://api.greynoise.io/v3/community/{ip}"
+    timeout_seconds: int = 10
+    # API key is read from GREYNOISE_API_KEY in .env, not stored here
+
+
+class CensysConfig(BaseModel):
+    search_url: str = "https://search.censys.io/api/v2/certificates/search"
+    timeout_seconds: int = 15
+    # Results per page — Censys max is 100
+    per_page: int = 100
+    # Max pages to walk per domain (each page = 1 API query against your quota)
+    # Default 5 pages × 100 results = up to 500 certs per domain
+    max_pages: int = 5
+    # Credentials are read from CENSYS_API_ID / CENSYS_API_SECRET in .env
+
+
 class AtlasConfig(BaseModel):
     analysis: AnalysisConfig = AnalysisConfig()
     blocklist: BlocklistConfig = BlocklistConfig()
     dnsbl: DNSBLConfig = DNSBLConfig()
     storage: StorageConfig = StorageConfig()
     server: ServerConfig = ServerConfig()
+    greynoise: GreyNoiseConfig = GreyNoiseConfig()
+    censys: CensysConfig = CensysConfig()
 
 
 def load_config(config_path: Path | None = None) -> AtlasConfig:

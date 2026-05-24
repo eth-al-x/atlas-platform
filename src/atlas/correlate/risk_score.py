@@ -125,6 +125,47 @@ class RiskScoreCorrelator(Correlator):
                     "reason": f"urlscan.io score {score_val}/100",
                 })
 
+        # ── GreyNoise signal ──────────────────────────────────
+        # RIOT suppresses noise from other signals — benign infra like
+        # Google/Cloudflare crawlers regularly trigger heuristics, DNSBL,
+        # and IP-based checks. A confirmed RIOT classification is a strong
+        # indicator that the domain is hosted on legitimate infrastructure.
+        # Process GreyNoise before the clamp so suppression takes effect.
+        greynoise = context.recon.get("greynoise")
+        if greynoise and not greynoise.error and "error" not in greynoise.data:
+            classification = greynoise.data.get("classification")
+            if classification == "malicious":
+                contribution = 15.0
+                score += contribution
+                contributions.append({
+                    "source": "greynoise",
+                    "category": "recon",
+                    "points": contribution,
+                    "reason": "GreyNoise classified IP as malicious",
+                })
+            elif greynoise.data.get("riot"):
+                # Known-benign service — apply a suppression credit
+                contribution = -20.0
+                score += contribution
+                name = greynoise.data.get("name") or "known-benign service"
+                contributions.append({
+                    "source": "greynoise",
+                    "category": "recon",
+                    "points": contribution,
+                    "reason": f"GreyNoise RIOT: IP belongs to {name}",
+                })
+            elif greynoise.data.get("noise") and classification != "malicious":
+                # Mass-scanner (e.g. Censys, Shodan probes) — small bump,
+                # not a verdict signal but worth surfacing to the analyst
+                contribution = 3.0
+                score += contribution
+                contributions.append({
+                    "source": "greynoise",
+                    "category": "recon",
+                    "points": contribution,
+                    "reason": "GreyNoise: IP is actively scanning the internet",
+                })
+
         # ── crt.sh velocity signal ────────────────────────────
         crtsh = context.recon.get("crtsh")
         if crtsh and not crtsh.error:

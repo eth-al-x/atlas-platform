@@ -57,6 +57,8 @@ def _make_recon_tools(config: AtlasConfig) -> dict:
     from atlas.recon.subdomains import SubdomainReconTool
     from atlas.recon.email_recon import EmailReconTool
     from atlas.recon.ip_neighborhood import IPNeighborhoodReconTool
+    from atlas.recon.greynoise import GreyNoiseReconTool
+    from atlas.recon.censys_certs import CensysCertsReconTool
 
     return {
         "dns": DNSReconTool(config),
@@ -69,6 +71,8 @@ def _make_recon_tools(config: AtlasConfig) -> dict:
         "subdomains": SubdomainReconTool(config),
         "email_recon": EmailReconTool(config),
         "ip_neighborhood": IPNeighborhoodReconTool(config),
+        "greynoise": GreyNoiseReconTool(config),
+        "censys_certs": CensysCertsReconTool(config),
     }
 
 
@@ -249,6 +253,49 @@ async def recon_email(
 
 
 @router.get(
+    "/greynoise/{domain}",
+    response_model=ReconResponse,
+    summary="GreyNoise IP classification",
+    description=(
+        "Resolves the domain to an IP and queries the GreyNoise Community API. "
+        "Returns noise/RIOT/classification signals — useful for distinguishing "
+        "targeted threats from internet background noise and suppressing false "
+        "positives on known-benign infrastructure.\n\n"
+        "Requires GREYNOISE_API_KEY in environment for higher rate limits. "
+        "Works without a key at 100 req/day."
+    ),
+)
+async def recon_greynoise(
+    domain: str,
+    tools: dict = Depends(get_tools),
+) -> ReconResponse:
+    result = await _run_tool(tools["greynoise"], domain)
+    return ReconResponse(result=result)
+
+
+@router.get(
+    "/censys/{domain}",
+    response_model=ReconResponse,
+    summary="Censys certificate search",
+    description=(
+        "Queries the Censys v2 API for all TLS certificates ever issued for "
+        "the domain, with richer metadata than crt.sh: validation level "
+        "(DV/OV/EV), parsed issuer, and SAN lists.\n\n"
+        "Requires CENSYS_API_ID and CENSYS_API_SECRET in environment. "
+        "Free tier: 250 queries/month (each paginated request = 1 query). "
+        "Returns a no-credentials result when keys are absent rather than erroring."
+    ),
+)
+async def recon_censys(
+    domain: str,
+    tools: dict = Depends(get_tools),
+) -> ReconResponse:
+    result = await _run_tool(tools["censys_certs"], domain)
+    return ReconResponse(result=result)
+
+
+
+@router.get(
     "/neighbors/{domain}",
     response_model=ReconResponse,
     summary="IP neighborhood enumeration (PTR-sweep)",
@@ -315,10 +362,12 @@ async def investigate(
         "whois": (domain, {}),
         "ip_intel": (domain, {}),
         "crtsh": (domain, {}),
+        "censys_certs": (domain, {}),
         "http_headers": (body.url, {}),
         "web_recon": (body.url, {}),
         "email_recon": (domain, {}),
         "ip_neighborhood": (domain, {}),
+        "greynoise": (domain, {}),
     }
 
     if not body.skip_slow:

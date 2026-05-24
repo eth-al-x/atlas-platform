@@ -350,6 +350,8 @@ def _print_recon_result(result, title: str) -> None:
         "crtsh": _render_crtsh,
         "urlscan": _render_urlscan,
         "subdomains": _render_subdomains,
+        "greynoise": _render_greynoise,
+        "censys_certs": _render_censys_certs,
     }
     renderer = renderers.get(result.recon_type)
     if renderer:
@@ -870,6 +872,171 @@ def _render_ip_neighborhood(result) -> None:
         )
 
 
+def _render_greynoise(result) -> None:
+    """Render GreyNoise classification — noise, RIOT, and actor context."""
+    data = result.data
+
+    if data.get("error"):
+        console.print(f"[yellow]GreyNoise error: {data['error']}[/yellow]")
+        return
+
+    ip = data.get("ip", "unknown")
+    classification = data.get("classification", "unknown")
+    seen = data.get("seen", False)
+    noise = data.get("noise", False)
+    riot = data.get("riot", False)
+    name = data.get("name")
+    last_seen = data.get("last_seen")
+    link = data.get("link")
+
+    # Headline: IP + classification color
+    class_colors = {
+        "malicious":  "bold red",
+        "benign":     "bold green",
+        "unknown":    "yellow",
+        "not_seen":   "dim",
+    }
+    class_style = class_colors.get(classification, "white")
+
+    console.print(f"[bold]IP address:[/bold]      {ip}")
+    console.print(
+        f"[bold]Classification:[/bold] [{class_style}]{classification.upper()}[/{class_style}]"
+    )
+
+    if not seen:
+        console.print("[dim]  (IP not in GreyNoise dataset — no recorded activity)[/dim]")
+        return
+
+    # Noise / RIOT badges
+    noise_str = "[red]✓ YES — actively scanning the internet[/red]" if noise else "[green]✗ no[/green]"
+    riot_str  = "[green]✓ YES — known-benign service[/green]" if riot else "[dim]no[/dim]"
+    console.print(f"[bold]Noise:[/bold]          {noise_str}")
+    console.print(f"[bold]RIOT:[/bold]           {riot_str}")
+
+    if name:
+        console.print(f"[bold]Actor/service:[/bold]  {name}")
+    if last_seen:
+        console.print(f"[bold]Last seen:[/bold]      {last_seen}")
+    if link:
+        console.print(f"[bold]GreyNoise URL:[/bold]  [link]{link}[/link]")
+
+    # Analyst note for RIOT suppression
+    if riot:
+        console.print(
+            "\n[dim]ℹ  RIOT: this IP belongs to a well-known benign service. "
+            "Other flags on this host may be false positives.[/dim]"
+        )
+
+
+@recon_app.command("greynoise")
+def recon_greynoise(
+    domain: str = typer.Argument(..., help="Domain to look up (e.g. example.com)"),
+) -> None:
+    """
+    Query GreyNoise for IP noise classification and RIOT status.
+
+    Resolves the domain to an IP, then checks whether that IP is
+    actively scanning the internet (noise), belongs to a known-benign
+    service like Google or Cloudflare (RIOT), or has been classified
+    malicious. Useful for suppressing false positives and distinguishing
+    targeted threats from background scanning activity.
+    """
+    logging.basicConfig(level=logging.WARNING)
+    for noisy in ("httpx", "httpcore", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    from atlas.core.domain import extract_domain
+    from atlas.recon.greynoise import GreyNoiseReconTool
+
+    clean = extract_domain(domain) if "/" in domain else domain.lower().strip()
+    tool = GreyNoiseReconTool(get_config())
+    result = tool.run(clean)
+    _print_recon_result(result, "GreyNoise")
+
+
+def _render_censys_certs(result) -> None:
+    """Render Censys certificate data — SANs, validation levels, issuer breakdown."""
+    data = result.data
+
+    if data.get("no_credentials"):
+        console.print(f"[yellow]{data.get('note', 'Censys credentials not configured.')}[/yellow]")
+        return
+
+    total = data.get("total_certs", 0)
+    total_reported = data.get("total_reported", total)
+    truncated = data.get("truncated", False)
+
+    if total == 0:
+        console.print("[dim]No certificates found in Censys.[/dim]")
+        return
+
+    # Headline
+    console.print(f"[bold]Certificates fetched:[/bold]  {total}", end="")
+    if truncated:
+        console.print(f"  [dim](of {total_reported:,} total — increase max_pages in config to fetch more)[/dim]")
+    else:
+        console.print()
+
+    # Validation breakdown — the most campaign-relevant signal
+    breakdown = data.get("validation_breakdown", {})
+    if breakdown:
+        console.print(f"\n[bold cyan]Validation levels[/bold cyan]")
+        for level, count in sorted(breakdown.items()):
+            level_color = {"DV": "yellow", "OV": "green", "EV": "bold green"}.get(level, "white")
+            console.print(f"  [{level_color}]{level}[/{level_color}]: {count} cert(s)")
+
+    dv_only = data.get("dv_only", False)
+    has_ov_ev = data.get("has_ov_ev", False)
+    if dv_only:
+        console.print(
+            "\n  [yellow]⚠  All certs are DV — consistent with attacker infrastructure. "
+            "Legitimate organizations typically have at least one OV cert.[/yellow]"
+        )
+    elif has_ov_ev:
+        console.print("\n  [green]✓  OV or EV cert present — consistent with legitimate organization.[/green]")
+
+    # Issuer breakdown
+    issuer_counts = data.get("issuer_counts", {})
+    if issuer_counts:
+        console.print(f"\n[bold cyan]Top issuers[/bold cyan]")
+        for issuer, count in issuer_counts.items():
+            console.print(f"  • {issuer}: {count}")
+
+    # Unique SANs — the subdomain discovery value
+    sans = data.get("unique_sans", [])
+    if sans:
+        console.print(f"\n[bold cyan]Unique names across all certs[/bold cyan] ({len(sans)} total)")
+        for san in sans[:20]:
+            console.print(f"  • {san}")
+        if len(sans) > 20:
+            console.print(f"  [dim](+{len(sans) - 20} more)[/dim]")
+
+
+@recon_app.command("censys")
+def recon_censys(
+    domain: str = typer.Argument(..., help="Domain to search certificates for"),
+) -> None:
+    """
+    Search Censys for TLS certificates issued to the domain.
+
+    Complements crt.sh with richer per-cert metadata: validation level
+    (DV/OV/EV), parsed issuer organization, and full SAN lists. All-DV
+    cert history is a campaign-infrastructure signal — legitimate orgs
+    buy OV or EV. Requires CENSYS_API_ID and CENSYS_API_SECRET in .env.
+    """
+    logging.basicConfig(level=logging.WARNING)
+    for noisy in ("httpx", "httpcore", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    from atlas.core.domain import extract_domain
+    from atlas.recon.censys_certs import CensysCertsReconTool
+
+    clean = extract_domain(domain) if "/" in domain else domain.lower().strip()
+    tool = CensysCertsReconTool(get_config())
+    result = tool.run(clean)
+    _print_recon_result(result, "Censys Certificates")
+
+
 # ── Renderers for WHOIS and IP Intel ──────────────────────────
 
 
@@ -1138,6 +1305,8 @@ def investigate(
     from atlas.recon.urlscan import URLScanReconTool
     from atlas.recon.web_recon import WebReconTool
     from atlas.recon.whois_lookup import WhoisReconTool
+    from atlas.recon.greynoise import GreyNoiseReconTool
+    from atlas.recon.censys_certs import CensysCertsReconTool
 
     config = get_config()
     clean_domain = extract_domain(target) if "/" in target else target.lower().strip()
@@ -1201,8 +1370,12 @@ def investigate(
         ("━━━ WHOIS ━━━", WhoisReconTool(config), clean_domain, "WHOIS", False),
         ("━━━ IP Intelligence ━━━", IPIntelReconTool(config), clean_domain,
          "IP Intelligence", False),
+        ("━━━ GreyNoise ━━━", GreyNoiseReconTool(config), clean_domain,
+         "GreyNoise", False),
         ("━━━ Certificate Transparency ━━━", CrtShReconTool(config), clean_domain,
          "Certificate Transparency (crt.sh)", False),
+        ("━━━ Censys Certificates ━━━", CensysCertsReconTool(config), clean_domain,
+         "Censys Certificates", False),
         ("━━━ HTTP Headers ━━━", HTTPHeadersReconTool(config), full_url,
          "HTTP Headers", False),
         ("━━━ Web Content ━━━", WebReconTool(config), full_url, "Web Recon", False),
