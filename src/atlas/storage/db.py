@@ -222,6 +222,7 @@ class ScanRepository:
         asn: str | None = None,
         registrar: str | None = None,
         favicon_hash: int | None = None,
+        slash24: str | None = None,
         limit_per_category: int = 10,
     ) -> dict[str, list[dict]]:
         """
@@ -231,11 +232,14 @@ class ScanRepository:
         JSON without needing a normalized schema. Each match category returns
         up to `limit_per_category` results, ordered by recency.
 
-        Returns a dict keyed by attribute name ('ip', 'asn', 'registrar',
-        'favicon'), each mapping to a list of matched scans with their domain,
-        verdict, and scan date for display.
+        Pivot categories: ip, asn, registrar, favicon, slash24
+        The slash24 pivot uses SQLite GLOB to find IPs in the same /24 range
+        without needing CIDR-aware indexing. The exact-IP pivot is still
+        run separately so we can show both kinds of relationships clearly.
         """
-        related: dict[str, list[dict]] = {"ip": [], "asn": [], "registrar": [], "favicon": []}
+        related: dict[str, list[dict]] = {
+            "ip": [], "asn": [], "registrar": [], "favicon": [], "slash24": [],
+        }
         conn = self._conn()
         try:
             if ip:
@@ -276,9 +280,128 @@ class ScanRepository:
                     exclude_scan_id=exclude_scan_id,
                     limit=limit_per_category,
                 )
+            if slash24:
+                # GLOB pattern matching: '1.2.3.*' matches every IP in 1.2.3.0/24.
+                # Also exclude the exact IP if we have one — those are already
+                # in related['ip'] and we don't want them appearing in both buckets.
+                exclude_ip = ip if ip else None
+                related["slash24"] = self._match_recon_glob(
+                    conn,
+                    recon_type="ip_intel",
+                    json_path="$.ip",
+                    glob_pattern=f"{slash24}.*",
+                    exclude_scan_id=exclude_scan_id,
+                    exclude_value=exclude_ip,
+                    limit=limit_per_category,
+                )
             return related
         finally:
             conn.close()
+
+    def find_scans_in_subnet(
+        self,
+        cidr: str,
+        exclude_scan_id: int | None = None,
+        exclude_exact_ip: str | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        """
+        Find all scans whose resolved IP falls within `cidr`.
+
+        Two-stage strategy: narrow with a string prefix in SQL (cheap and
+        index-friendly enough at our scale), then post-filter precisely
+        with `ipaddress.ip_network` to handle non-octet-aligned CIDRs.
+
+        Args:
+            cidr: Any valid IPv4 CIDR (`1.2.3.0/24`, `203.0.113.0/27`, etc.).
+            exclude_scan_id: Omit this scan from results (use when called
+                from a correlator on the current scan).
+            exclude_exact_ip: Omit scans whose IP matches this exactly —
+                useful when stacking with the IP-exact pivot to avoid
+                surfacing the same scan in two categories.
+            limit: Max rows returned.
+
+        Returns scan rows enriched with `matched_ip` so the caller can
+        show *which* IP in the subnet was hit.
+        """
+        import ipaddress
+
+        try:
+            network = ipaddress.ip_network(cidr, strict=False)
+        except ValueError as exc:
+            logger.warning("Invalid CIDR %r: %s", cidr, exc)
+            return []
+
+        # IPv6 isn't supported yet — the rest of ATLAS resolves only A records.
+        if network.version != 4:
+            return []
+
+        # Pick the broadest octet-aligned prefix that contains the network.
+        # /24 → "a.b.c.", /16 → "a.b.", /8 → "a.". For sub-/24, we still use
+        # the /24 prefix and post-filter — false positives are cheap.
+        if network.prefixlen >= 24:
+            prefix_octets = 3
+        elif network.prefixlen >= 16:
+            prefix_octets = 2
+        elif network.prefixlen >= 8:
+            prefix_octets = 1
+        else:
+            prefix_octets = 0  # extremely broad — let SQL return everything
+
+        if prefix_octets > 0:
+            base_parts = str(network.network_address).split(".")
+            sql_prefix = ".".join(base_parts[:prefix_octets]) + "."
+            sql_where = "AND json_extract(r.data, '$.ip') LIKE ?"
+            sql_params = (sql_prefix + "%",)
+        else:
+            sql_where = ""
+            sql_params = ()
+
+        # We pull more than `limit` from SQL because post-filtering may discard rows
+        # (when the CIDR is narrower than the prefix). 4x is a comfortable margin.
+        sql_limit = max(limit * 4, 100)
+
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT s.id            AS scan_id,
+                       s.domain        AS domain,
+                       s.url           AS url,
+                       s.final_verdict AS verdict,
+                       s.scanned_at    AS scanned_at,
+                       json_extract(r.data, '$.ip') AS matched_ip
+                FROM recon_results r
+                JOIN scans s ON s.id = r.scan_id
+                WHERE r.recon_type = 'ip_intel'
+                  AND json_extract(r.data, '$.ip') IS NOT NULL
+                  {sql_where}
+                ORDER BY s.scanned_at DESC
+                LIMIT ?
+                """,
+                (*sql_params, sql_limit),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        results: list[dict] = []
+        for row in rows:
+            scan_id = row["scan_id"]
+            ip_str = row["matched_ip"]
+            if exclude_scan_id is not None and scan_id == exclude_scan_id:
+                continue
+            if exclude_exact_ip is not None and ip_str == exclude_exact_ip:
+                continue
+            try:
+                if ipaddress.ip_address(ip_str) not in network:
+                    continue
+            except ValueError:
+                continue
+            results.append(dict(row))
+            if len(results) >= limit:
+                break
+
+        return results
 
     @staticmethod
     def _match_recon(
@@ -311,6 +434,50 @@ class ScanRepository:
             """,
             (recon_type, json_path, value, exclude_scan_id, limit),
         ).fetchall()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def _match_recon_glob(
+        conn: sqlite3.Connection,
+        *,
+        recon_type: str,
+        json_path: str,
+        glob_pattern: str,
+        exclude_scan_id: int,
+        exclude_value: str | None,
+        limit: int,
+    ) -> list[dict]:
+        """
+        Same shape as _match_recon, but uses SQLite GLOB instead of equality.
+        Enables CIDR-style "same /24" queries via patterns like '1.2.3.*'.
+
+        Optionally excludes a specific exact value (so a slash24 result
+        doesn't duplicate an exact-IP result already in another category).
+        Also excludes the JSON null literal '*' patterns return on missing
+        fields (json_extract returns NULL → GLOB never matches, so this is
+        safe; we mention it because it's a subtle SQLite behavior).
+        """
+        sql = """
+            SELECT s.id            AS scan_id,
+                   s.domain        AS domain,
+                   s.url           AS url,
+                   s.final_verdict AS verdict,
+                   s.scanned_at    AS scanned_at,
+                   json_extract(r.data, ?) AS matched_value
+            FROM recon_results r
+            JOIN scans s ON s.id = r.scan_id
+            WHERE r.recon_type = ?
+              AND json_extract(r.data, ?) GLOB ?
+              AND r.scan_id != ?
+        """
+        params: list = [json_path, recon_type, json_path, glob_pattern, exclude_scan_id]
+        if exclude_value is not None:
+            sql += " AND json_extract(r.data, ?) != ?"
+            params.extend([json_path, exclude_value])
+        sql += " ORDER BY s.scanned_at DESC LIMIT ?"
+        params.append(limit)
+
+        rows = conn.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
 
     def get_correlations(self, scan_id: int) -> list[CorrelationResult]:

@@ -85,8 +85,9 @@ class CrossScanCorrelator(Correlator):
         asn = self._current_asn(context)
         registrar = self._current_registrar(context)
         favicon_hash = self._current_favicon_hash(context)
+        slash24 = self._slash24_prefix(ip) if ip else None
 
-        if not any([ip, asn, registrar, favicon_hash is not None]):
+        if not any([ip, asn, registrar, favicon_hash is not None, slash24]):
             return CorrelationResult(
                 summary="No pivot attributes available for cross-scan correlation",
                 findings=[],
@@ -99,6 +100,7 @@ class CrossScanCorrelator(Correlator):
             asn=asn,
             registrar=registrar,
             favicon_hash=favicon_hash,
+            slash24=slash24,
         )
 
         findings: list[dict[str, Any]] = []
@@ -107,6 +109,7 @@ class CrossScanCorrelator(Correlator):
             ("asn", "Same ASN", asn),
             ("registrar", "Same registrar", registrar),
             ("favicon", "Same favicon", favicon_hash),
+            ("slash24", "Same /24", slash24),
         ):
             for row in related.get(category, []):
                 findings.append({
@@ -136,6 +139,8 @@ class CrossScanCorrelator(Correlator):
                 parts.append(f"{len(related['registrar'])} via same registrar")
             if related.get("favicon"):
                 parts.append(f"{len(related['favicon'])} sharing favicon")
+            if related.get("slash24"):
+                parts.append(f"{len(related['slash24'])} in same /24")
             summary = (
                 f"{len(unique_domains)} related domain(s) found ({', '.join(parts)})"
             )
@@ -154,6 +159,7 @@ class CrossScanCorrelator(Correlator):
                     "asn": asn,
                     "registrar": registrar,
                     "favicon_hash": favicon_hash,
+                    "slash24": slash24,
                 },
             },
         )
@@ -200,3 +206,25 @@ class CrossScanCorrelator(Correlator):
             return None
         h = favicon.get("mmh3_hash")
         return h if isinstance(h, int) else None
+
+    @staticmethod
+    def _slash24_prefix(ip: str) -> str | None:
+        """
+        Reduce an IPv4 address to its /24 prefix string (e.g. '1.2.3').
+        Returns None for IPv6 or malformed addresses — those can't be
+        pivoted via the GLOB pattern this correlator uses.
+        """
+        if not ip:
+            return None
+        octets = ip.split(".")
+        if len(octets) != 4:
+            return None
+        # Validate each octet to avoid pushing garbage into the GLOB query
+        try:
+            for octet in octets:
+                n = int(octet)
+                if not (0 <= n <= 255):
+                    return None
+        except ValueError:
+            return None
+        return ".".join(octets[:3])

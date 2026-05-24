@@ -3,6 +3,7 @@ atlas.api.routes.pivot
 Pivot endpoints — find all scans related to a single piece of evidence.
 
 GET /pivot/favicon/{favicon_hash}   Scans sharing a favicon hash
+GET /pivot/subnet?cidr=...           Scans whose IP falls in a CIDR range
 
 Pivots are direct queries against the scan history that take one piece of
 evidence (a favicon hash, an IP, an ASN) and return every prior scan that
@@ -15,10 +16,11 @@ SIEM alert — without first having to scan a related domain.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 from functools import partial
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from atlas.api.dependencies import get_repo
 from atlas.storage.db import ScanRepository
@@ -59,5 +61,47 @@ async def pivot_favicon(
     return {
         "favicon_hash": favicon_hash,
         "match_count": len(matches),
+        "matches": matches,
+    }
+
+
+@router.get(
+    "/subnet",
+    summary="Find scans with IPs in a subnet",
+    description=(
+        "Given an IPv4 CIDR, return every prior scan whose resolved IP "
+        "falls within that range.\n\n"
+        "Phishing campaigns often park multiple lookalike domains on "
+        "neighboring IPs. /24 is the canonical 'same machine or rack' "
+        "boundary; /27 and narrower often indicate shared-tenant VPS "
+        "clusters or single operators; /16 catches whole hosting providers."
+    ),
+)
+async def pivot_subnet(
+    cidr: str = Query(
+        ...,
+        description="IPv4 CIDR (e.g. 203.0.113.0/24, 198.51.100.0/27)",
+        examples=["203.0.113.0/24"],
+    ),
+    limit: int = Query(default=50, ge=1, le=200),
+    repo: ScanRepository = Depends(get_repo),
+) -> dict:
+    # Validate CIDR before touching the DB so we can return a clean 400
+    try:
+        network = ipaddress.ip_network(cidr, strict=False)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid CIDR: {exc}")
+    if network.version != 4:
+        raise HTTPException(status_code=400, detail="IPv6 not supported (only IPv4 CIDRs)")
+
+    loop = asyncio.get_event_loop()
+    matches = await loop.run_in_executor(
+        None,
+        partial(repo.find_scans_in_subnet, str(network), None, None, limit),
+    )
+    return {
+        "cidr": str(network),
+        "match_count": len(matches),
+        "address_count": network.num_addresses,
         "matches": matches,
     }

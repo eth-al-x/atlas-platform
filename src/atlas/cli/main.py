@@ -782,6 +782,94 @@ def _render_email_posture(result) -> None:
             console.print(f"  • {issue}")
 
 
+@recon_app.command("neighbors")
+def recon_neighbors(
+    domain: str = typer.Argument(..., help="Domain or IP to investigate"),
+    cidr: int = typer.Option(
+        28, "--cidr", "-c", min=24, max=30,
+        help="CIDR prefix length to enumerate (24=256 IPs … 30=4 IPs). Default 28.",
+    ),
+) -> None:
+    """
+    Enumerate IPs adjacent to the target via PTR lookups.
+
+    Useful for surfacing campaign infrastructure: phishing operators
+    frequently park multiple lookalike domains on the same VPS or a
+    tight cluster of IPs from the same provider. The PTR sweep reveals
+    what else is parked nearby — at the DNS level, no contact with
+    the host itself.
+    """
+    logging.basicConfig(level=logging.WARNING)
+    for noisy in ("httpx", "httpcore", "urllib3", "dns"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    from atlas.core.domain import extract_domain
+    from atlas.recon.ip_neighborhood import IPNeighborhoodReconTool
+
+    clean = extract_domain(domain) if "/" in domain else domain.lower().strip()
+    tool = IPNeighborhoodReconTool(get_config())
+    result = tool.run(clean, cidr_bits=cidr)
+    _render_ip_neighborhood(result)
+
+
+def _render_ip_neighborhood(result) -> None:
+    """Render the IP neighborhood output: target, CIDR, table of neighbors."""
+    data = result.data
+
+    header = Text()
+    header.append("🌐 IP Neighborhood\n", style="bold blue")
+    header.append(f"Target:  {result.domain}\n", style="dim")
+    header.append(f"IP:      {data.get('ip') or '—'}\n", style="dim")
+    if data.get("cidr"):
+        header.append(f"CIDR:    {data['cidr']}\n", style="dim")
+
+    if data.get("error"):
+        header.append(f"\nError: {data['error']}", style="red")
+        console.print(Panel(header, border_style="red"))
+        return
+
+    summary = data.get("summary") or {}
+    header.append(
+        f"Found:   {summary.get('neighbors_found', 0)} of "
+        f"{summary.get('ips_probed', 0)} probed",
+        style="dim",
+    )
+    console.print(Panel(header, border_style="blue"))
+
+    neighbors = data.get("neighbors") or []
+    if not neighbors:
+        console.print("\n[dim]No PTR records resolved in this neighborhood.[/dim]")
+        return
+
+    table = Table(
+        title=f"\nPTRs in {data['cidr']}",
+        show_header=True, header_style="bold cyan",
+    )
+    table.add_column("IP", min_width=15)
+    table.add_column("PTR", min_width=30)
+    table.add_column("", min_width=6)
+
+    for n in neighbors:
+        marker = "[bold yellow]← self[/bold yellow]" if n.get("self") else ""
+        # Highlight target row
+        ip_style = "bold yellow" if n.get("self") else "white"
+        table.add_row(
+            f"[{ip_style}]{n['ip']}[/{ip_style}]",
+            n.get("ptr", "—"),
+            marker,
+        )
+    console.print(table)
+
+    # Show the rolled-up apex domains for an at-a-glance view of "what's
+    # in this neighborhood, regardless of which specific host it's on"
+    apex_list = summary.get("unique_domains") or []
+    if len(apex_list) > 1:
+        console.print(
+            f"\n[bold]Apex domains in neighborhood:[/bold] "
+            f"{', '.join(apex_list)}"
+        )
+
+
 # ── Renderers for WHOIS and IP Intel ──────────────────────────
 
 
@@ -1377,10 +1465,10 @@ def serve(
 
 # ── Watch subcommand group ────────────────────────────────────
 
-_watch_repo: "WatchRepository | None" = None  # type: ignore[name-defined]  # noqa: F821
+_watch_repo: "WatchRepository | None" = None  # type: ignore[name-defined]
 
 
-def _get_watch_repo() -> "WatchRepository":  # type: ignore[name-defined]  # noqa: F821
+def _get_watch_repo() -> "WatchRepository":  # type: ignore[name-defined]
     global _watch_repo
     if _watch_repo is None:
         from atlas.storage.db import WatchRepository
@@ -1639,7 +1727,7 @@ def watch_run(
         typer.echo(buf.getvalue(), nl=False)
 
 
-def _print_watch_alert(alert: "WatchAlert") -> None:  # type: ignore[name-defined]  # noqa: F821
+def _print_watch_alert(alert: "WatchAlert") -> None:  # type: ignore[name-defined]
     """Render a single watch alert line to the terminal."""
     direction_icon = {
         "new":           "🆕",
@@ -1770,6 +1858,113 @@ def pivot_favicon(
     console.print(
         f"[dim]{len(matches)} match(es). "
         f"Domains sharing a favicon often share an operator or impersonation target.[/dim]"
+    )
+
+
+@pivot_app.command("subnet")
+def pivot_subnet(
+    cidr: str = typer.Argument(
+        ...,
+        help="IPv4 CIDR to search (e.g. 1.2.3.0/24, 203.0.113.0/27).",
+    ),
+    output: str = typer.Option(
+        "terminal", "--output", "-o",
+        help="Output format: terminal (default), json, or csv",
+    ),
+    limit: int = typer.Option(
+        20, "--limit", "-n", min=1, max=200,
+        help="Maximum results to return.",
+    ),
+) -> None:
+    """
+    Find every prior scan whose resolved IP falls within the given CIDR.
+
+    The "what else lives in this neighborhood" pivot: phishing campaigns
+    frequently park multiple lookalike domains on the same VPS, and many
+    bulk hosters allocate /24s to single tenants. Finding one operator
+    typically means finding several of their other domains in the same
+    address range.
+
+    Accepts any valid IPv4 CIDR. /24 is the canonical "same machine or
+    rack" boundary; narrower CIDRs (/27, /28) often catch shared-tenant
+    VPS clusters; wider (/16) catches whole hosting-provider footprints.
+    """
+    from atlas.core.export import OUTPUT_FORMATS
+    import csv as _csv, io as _io
+
+    if output not in OUTPUT_FORMATS:
+        console.print(f"[red]Invalid --output: {output!r}. Use: {', '.join(OUTPUT_FORMATS)}[/red]")
+        raise typer.Exit(2)
+
+    # Validate CIDR up front for a clean error before touching the DB
+    import ipaddress
+    try:
+        network = ipaddress.ip_network(cidr, strict=False)
+    except ValueError as exc:
+        console.print(f"[red]Invalid CIDR {cidr!r}: {exc}[/red]")
+        raise typer.Exit(2)
+    if network.version != 4:
+        console.print("[red]IPv6 not supported (only IPv4 CIDRs).[/red]")
+        raise typer.Exit(2)
+
+    repo = _get_repo()
+    matches = repo.find_scans_in_subnet(str(network), limit=limit)
+
+    if output == "json":
+        typer.echo(json.dumps(
+            {"cidr": str(network), "match_count": len(matches), "matches": matches},
+            indent=2, default=str,
+        ))
+        return
+
+    if output == "csv":
+        columns = ("scan_id", "domain", "url", "matched_ip", "verdict", "scanned_at")
+        buf = _io.StringIO()
+        writer = _csv.DictWriter(buf, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        for m in matches:
+            writer.writerow(m)
+        typer.echo(buf.getvalue(), nl=False)
+        return
+
+    # ── Terminal output ───────────────────────────────────────
+    if not matches:
+        console.print(
+            f"[dim]No scans found with IPs in[/dim] [bold]{network}[/bold] "
+            f"[dim]({network.num_addresses} addresses in range)[/dim]"
+        )
+        return
+
+    from atlas.core.models import Verdict
+    table = Table(
+        title=f"Scans in [bold cyan]{network}[/bold cyan]",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Scan ID", justify="right", min_width=8)
+    table.add_column("Domain", min_width=24)
+    table.add_column("IP", min_width=15)
+    table.add_column("Verdict", min_width=12)
+    table.add_column("Scanned At", min_width=20)
+
+    for m in matches:
+        verdict_enum = next(
+            (v for v in Verdict if v.value == m["verdict"]),
+            Verdict.CLEAN,
+        )
+        _, color = _verdict_style(verdict_enum)
+        table.add_row(
+            str(m["scan_id"]),
+            m["domain"],
+            m.get("matched_ip") or "—",
+            f"[{color}]{m['verdict']}[/{color}]",
+            (m.get("scanned_at") or "")[:19],
+        )
+    console.print(table)
+    console.print(
+        f"[dim]{len(matches)} match(es) in {network.num_addresses}-address range. "
+        f"Same /24 often means shared hosting; same /27 or narrower often "
+        f"means same operator.[/dim]"
     )
 
 

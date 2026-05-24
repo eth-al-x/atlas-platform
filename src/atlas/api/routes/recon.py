@@ -56,6 +56,7 @@ def _make_recon_tools(config: AtlasConfig) -> dict:
     from atlas.recon.urlscan import URLScanReconTool
     from atlas.recon.subdomains import SubdomainReconTool
     from atlas.recon.email_recon import EmailReconTool
+    from atlas.recon.ip_neighborhood import IPNeighborhoodReconTool
 
     return {
         "dns": DNSReconTool(config),
@@ -67,6 +68,7 @@ def _make_recon_tools(config: AtlasConfig) -> dict:
         "urlscan": URLScanReconTool(config),
         "subdomains": SubdomainReconTool(config),
         "email_recon": EmailReconTool(config),
+        "ip_neighborhood": IPNeighborhoodReconTool(config),
     }
 
 
@@ -246,6 +248,30 @@ async def recon_email(
     return ReconResponse(result=result)
 
 
+@router.get(
+    "/neighbors/{domain}",
+    response_model=ReconResponse,
+    summary="IP neighborhood enumeration (PTR-sweep)",
+    description=(
+        "Resolves the domain's IP and runs PTR lookups against every "
+        "address in the surrounding CIDR block. Surfaces other domains "
+        "parked on the same shared host or in the same tight provider "
+        "range — a frequent signal of campaign infrastructure.\n\n"
+        "Pure DNS, no contact with the target host. Default neighborhood "
+        "is /28 (16 IPs); use cidr_bits to widen up to /24 (256 IPs) "
+        "or narrow to /30 (4 IPs)."
+    ),
+)
+async def recon_neighbors(
+    domain: str,
+    cidr_bits: int = Query(default=28, ge=24, le=30,
+                            description="CIDR prefix length to enumerate (24-30)."),
+    tools: dict = Depends(get_tools),
+) -> ReconResponse:
+    result = await _run_tool(tools["ip_neighborhood"], domain, cidr_bits=cidr_bits)
+    return ReconResponse(result=result)
+
+
 # ── Investigate endpoint ──────────────────────────────────────
 
 
@@ -292,6 +318,7 @@ async def investigate(
         "http_headers": (body.url, {}),
         "web_recon": (body.url, {}),
         "email_recon": (domain, {}),
+        "ip_neighborhood": (domain, {}),
     }
 
     if not body.skip_slow:
