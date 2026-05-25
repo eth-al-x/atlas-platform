@@ -475,14 +475,15 @@ async function loadGraph() {
 
   // Visible loading hint while the request is in flight
   stats.textContent = 'loading…';
+  stats.classList.remove('graph-stats--error');
   stage?.classList.add('is-loading');
 
-  // Fail fast if Cytoscape didn't load (offline / CDN blocked)
+  // Fail fast if Cytoscape didn't load (offline / CDN blocked).
+  // Surfaces in the stats line so the canvas DOM stays intact for retries.
   if (typeof cytoscape !== 'function') {
-    stage.innerHTML = errorBlock(new Error(
-      'Cytoscape failed to load. Check your network connection — the graph view ' +
-      'requires loading cytoscape.min.js from a CDN.'
-    ));
+    stats.textContent = 'cytoscape failed to load (cdn blocked?)';
+    stats.classList.add('graph-stats--error');
+    stage?.classList.remove('is-loading');
     return;
   }
 
@@ -504,8 +505,10 @@ async function loadGraph() {
 
     renderCytoscape(data, layout);
   } catch (err) {
-    stage.innerHTML = errorBlock(err);
-    stats.textContent = 'error';
+    // Surface errors in the stats line — leaves #cy intact so subsequent
+    // depth/layout changes can retry without a page reload.
+    stats.textContent = `error: ${err.message}`;
+    stats.classList.add('graph-stats--error');
   } finally {
     stage?.classList.remove('is-loading');
   }

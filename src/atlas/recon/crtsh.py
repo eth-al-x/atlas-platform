@@ -130,7 +130,6 @@ class CrtShReconTool(ReconTool):
                 return data if isinstance(data, list) else []
 
             except httpx.HTTPError as exc:
-                last_error = exc
                 if attempt < max_attempts - 1:
                     import time
 

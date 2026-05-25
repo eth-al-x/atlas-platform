@@ -163,7 +163,7 @@ class EmailReconTool(ReconTool):
         """
         try:
             txts = self._all_txt(f"_dmarc.{domain}")
-        except Exception:
+        except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN, dns.exception.DNSException):
             txts = []
 
         dmarc_records = [t for t in txts if t.lower().startswith("v=dmarc1")]

@@ -29,7 +29,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from atlas.api.dependencies import get_repo
-from atlas.correlate.cross_scan import CrossScanCorrelator
+from atlas.correlate import pivots as pivot_helpers
 from atlas.storage.db import ScanRepository
 
 logger = logging.getLogger(__name__)
@@ -217,59 +217,18 @@ def _node_payload(
     }
 
 
-# ── Pivot extraction (parallels CrossScanCorrelator) ──────────
+# ── Pivot extraction (delegates to atlas.correlate.pivots) ────
 
 
-def _extract_pivots(recon: dict) -> dict[str, Any]:
+def _extract_pivots(recon: dict) -> dict:
     """
-    Pull pivot attributes from a scan's recon results.
+    Thin wrapper around pivot_helpers.extract_all().
 
-    Returns a dict with keys ip, asn, registrar, favicon_hash, slash24.
-    Any field that couldn't be extracted is None — the caller treats
-    None as "this pivot is inactive for this scan".
-
-    This intentionally mirrors the extraction logic in CrossScanCorrelator
-    so a scan's graph reflects exactly what its cross-scan correlation
-    would have surfaced — same pivots, same results.
+    Kept as a module-private function so the BFS loop above can stay
+    readable and so future graph-specific logic (e.g., custom filters
+    on which pivots to include) has a single insertion point.
     """
-    ip_intel = recon.get("ip_intel")
-    whois = recon.get("whois")
-    web = recon.get("web_recon")
-
-    ip: str | None = None
-    asn: str | None = None
-    if ip_intel is not None and not ip_intel.error:
-        ip_val = ip_intel.data.get("ip")
-        if isinstance(ip_val, str) and ip_val:
-            ip = ip_val
-        geo = ip_intel.data.get("geolocation") or {}
-        asn_val = geo.get("asn")
-        if isinstance(asn_val, str) and asn_val:
-            asn = asn_val
-
-    registrar: str | None = None
-    if whois is not None and not whois.error:
-        reg = whois.data.get("registrar")
-        if isinstance(reg, str) and reg:
-            registrar = reg
-
-    favicon_hash: int | None = None
-    if web is not None and not web.error:
-        favicon = web.data.get("favicon") or {}
-        if isinstance(favicon, dict) and not favicon.get("error"):
-            h = favicon.get("mmh3_hash")
-            if isinstance(h, int):
-                favicon_hash = h
-
-    slash24 = CrossScanCorrelator._slash24_prefix(ip) if ip else None
-
-    return {
-        "ip": ip,
-        "asn": asn,
-        "registrar": registrar,
-        "favicon_hash": favicon_hash,
-        "slash24": slash24,
-    }
+    return pivot_helpers.extract_all(recon)
 
 
 def _pivot_display_value(category: str, pivots: dict[str, Any]) -> str:

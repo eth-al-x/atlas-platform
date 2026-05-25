@@ -31,6 +31,7 @@ from typing import Any
 from atlas.core.config import AtlasConfig
 from atlas.core.models import CorrelationContext, CorrelationResult
 from atlas.correlate.base import Correlator
+from atlas.correlate import pivots as pivot_helpers
 
 logger = logging.getLogger(__name__)
 
@@ -81,11 +82,11 @@ class CrossScanCorrelator(Correlator):
             )
 
         # Extract the attributes we want to pivot on from current recon data
-        ip = self._current_ip(context)
-        asn = self._current_asn(context)
-        registrar = self._current_registrar(context)
-        favicon_hash = self._current_favicon_hash(context)
-        slash24 = self._slash24_prefix(ip) if ip else None
+        ip = pivot_helpers.extract_ip(context.recon)
+        asn = pivot_helpers.extract_asn(context.recon)
+        registrar = pivot_helpers.extract_registrar(context.recon)
+        favicon_hash = pivot_helpers.extract_favicon_hash(context.recon)
+        slash24 = pivot_helpers.slash24_prefix(ip)
 
         if not any([ip, asn, registrar, favicon_hash is not None, slash24]):
             return CorrelationResult(
@@ -165,66 +166,29 @@ class CrossScanCorrelator(Correlator):
         )
 
     # ── Pivot extraction ─────────────────────────────────────
+    #
+    # These helpers used to live here inline. They've been moved to
+    # `atlas.correlate.pivots` so the graph endpoint (and any future
+    # consumers) can use the same extraction logic without duplication.
+    # We keep these thin delegates around as a stable backward-compatible
+    # API for anything importing them directly.
 
     @staticmethod
     def _current_ip(context: CorrelationContext) -> str | None:
-        ip_intel = context.recon.get("ip_intel")
-        if not ip_intel or ip_intel.error:
-            return None
-        ip = ip_intel.data.get("ip")
-        return ip if isinstance(ip, str) and ip else None
+        return pivot_helpers.extract_ip(context.recon)
 
     @staticmethod
     def _current_asn(context: CorrelationContext) -> str | None:
-        ip_intel = context.recon.get("ip_intel")
-        if not ip_intel or ip_intel.error:
-            return None
-        geo = ip_intel.data.get("geolocation") or {}
-        asn = geo.get("asn")
-        return asn if isinstance(asn, str) and asn else None
+        return pivot_helpers.extract_asn(context.recon)
 
     @staticmethod
     def _current_registrar(context: CorrelationContext) -> str | None:
-        whois_data = context.recon.get("whois")
-        if not whois_data or whois_data.error:
-            return None
-        registrar = whois_data.data.get("registrar")
-        return registrar if isinstance(registrar, str) and registrar else None
+        return pivot_helpers.extract_registrar(context.recon)
 
     @staticmethod
     def _current_favicon_hash(context: CorrelationContext) -> int | None:
-        """
-        Pull the MMH3 favicon hash from the current scan's web_recon data.
-        Returns None if web_recon didn't run, failed, or got no favicon —
-        all of which are normal outcomes that should leave this pivot inactive.
-        """
-        web_data = context.recon.get("web_recon")
-        if not web_data or web_data.error:
-            return None
-        favicon = web_data.data.get("favicon") or {}
-        if not isinstance(favicon, dict) or favicon.get("error"):
-            return None
-        h = favicon.get("mmh3_hash")
-        return h if isinstance(h, int) else None
+        return pivot_helpers.extract_favicon_hash(context.recon)
 
     @staticmethod
-    def _slash24_prefix(ip: str) -> str | None:
-        """
-        Reduce an IPv4 address to its /24 prefix string (e.g. '1.2.3').
-        Returns None for IPv6 or malformed addresses — those can't be
-        pivoted via the GLOB pattern this correlator uses.
-        """
-        if not ip:
-            return None
-        octets = ip.split(".")
-        if len(octets) != 4:
-            return None
-        # Validate each octet to avoid pushing garbage into the GLOB query
-        try:
-            for octet in octets:
-                n = int(octet)
-                if not (0 <= n <= 255):
-                    return None
-        except ValueError:
-            return None
-        return ".".join(octets[:3])
+    def _slash24_prefix(ip: str | None) -> str | None:
+        return pivot_helpers.slash24_prefix(ip)

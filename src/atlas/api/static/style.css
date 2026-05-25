@@ -1111,6 +1111,10 @@ body::before {
   letter-spacing: 0.04em;
 }
 
+.graph-stats--error {
+  color: var(--v-high);
+}
+
 /* ── Stage (canvas + legend) ─────────────────────────────── */
 
 .graph-stage {

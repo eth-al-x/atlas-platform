@@ -89,11 +89,62 @@ CREATE INDEX IF NOT EXISTS idx_watches_domain ON watches(domain);
 def get_connection(db_path: str | None = None) -> sqlite3.Connection:
     """Create a SQLite connection with sensible defaults."""
     path = db_path or get_config().storage.database_path
-    conn = sqlite3.connect(path)
+    # `timeout` is SQLite's busy_timeout under the hood: when a write is
+    # blocked by another writer, the call will wait up to this many seconds
+    # before raising OperationalError. WAL mode (set below) makes long
+    # waits rare, but bursts during concurrent CLI + watch runs can still
+    # hit short contention windows.
+    conn = sqlite3.connect(path, timeout=10.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
+
+
+# ── Defense-in-depth retry for SQLITE_BUSY ────────────────────
+# The connect() timeout above is the primary protection. This wrapper
+# catches the rare cases where SQLite still raises OperationalError —
+# e.g., during writer-vs-checkpoint races in WAL mode under heavy load.
+
+_SQLITE_BUSY_TOKENS = ("database is locked", "database is busy")
+
+
+def _is_transient_sqlite_error(exc: BaseException) -> bool:
+    return (
+        isinstance(exc, sqlite3.OperationalError)
+        and any(t in str(exc).lower() for t in _SQLITE_BUSY_TOKENS)
+    )
+
+
+def _retry_on_busy(fn):
+    """
+    Decorator: retry transient SQLITE_BUSY errors with exponential backoff.
+    Up to 4 attempts (50ms, 100ms, 200ms delays — total ~350ms worst case).
+    Non-transient OperationalErrors (schema mismatch, etc.) pass through.
+    """
+    import functools
+    import time
+
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        last_exc: BaseException | None = None
+        for attempt in range(4):
+            try:
+                return fn(*args, **kwargs)
+            except sqlite3.OperationalError as exc:
+                if not _is_transient_sqlite_error(exc):
+                    raise
+                last_exc = exc
+                if attempt < 3:
+                    time.sleep(0.05 * (2 ** attempt))
+                    logger.warning(
+                        "SQLite busy on attempt %d, retrying: %s",
+                        attempt + 1, exc,
+                    )
+        assert last_exc is not None
+        raise last_exc
+
+    return wrapped
 
 
 def initialize_db(db_path: str | None = None) -> None:
@@ -114,6 +165,7 @@ class ScanRepository:
     def _conn(self) -> sqlite3.Connection:
         return get_connection(self.db_path)
 
+    @_retry_on_busy
     def save_scan(self, report: ScanReport) -> int:
         """Persist a scan report and its tier results. Returns the scan ID."""
         conn = self._conn()
@@ -150,6 +202,7 @@ class ScanRepository:
         finally:
             conn.close()
 
+    @_retry_on_busy
     def save_correlations(self, scan_id: int, correlations: list[CorrelationResult]) -> None:
         """Persist correlation results for an existing scan."""
         conn = self._conn()
@@ -166,6 +219,7 @@ class ScanRepository:
         finally:
             conn.close()
 
+    @_retry_on_busy
     def save_recon_results(self, scan_id: int, recon: dict[str, "ReconResult"]) -> None:
         """Persist recon results for an existing scan."""
         from atlas.core.models import ReconResult  # avoid circular at module level
@@ -621,41 +675,37 @@ class WatchRepository:
     def _conn(self) -> sqlite3.Connection:
         return get_connection(self.db_path)
 
+    @_retry_on_busy
     def add_watch(self, domain: str, url: str) -> "WatchEntry":
         """
         Register a domain for monitoring.
 
-        Idempotent: if the domain already exists, re-activates it (in case it
-        was previously removed) and returns the updated entry.
+        Idempotent: if the domain already exists, re-activates it (in case
+        it was previously removed) and updates the URL. Implemented as an
+        atomic UPSERT so concurrent callers don't race between the
+        existence check and the INSERT.
         """
-        from atlas.core.models import WatchEntry
+        from atlas.core.models import WatchEntry  # noqa: F401  (used by _row_to_entry)
 
         conn = self._conn()
         try:
-            existing = conn.execute(
+            # Single atomic statement: insert or update on the unique domain.
+            # ON CONFLICT clause replaces the prior check-then-INSERT pattern
+            # that could race with another writer between the two steps.
+            conn.execute(
+                """
+                INSERT INTO watches (domain, url, active)
+                VALUES (?, ?, 1)
+                ON CONFLICT(domain) DO UPDATE SET
+                    url = excluded.url,
+                    active = 1
+                """,
+                (domain, url),
+            )
+            conn.commit()
+            row = conn.execute(
                 "SELECT * FROM watches WHERE domain = ?", (domain,)
             ).fetchone()
-
-            if existing:
-                # Re-activate if it was deactivated
-                conn.execute(
-                    "UPDATE watches SET active = 1, url = ? WHERE domain = ?",
-                    (url, domain),
-                )
-                conn.commit()
-                row = conn.execute(
-                    "SELECT * FROM watches WHERE domain = ?", (domain,)
-                ).fetchone()
-            else:
-                cursor = conn.execute(
-                    "INSERT INTO watches (domain, url, active) VALUES (?, ?, 1)",
-                    (domain, url),
-                )
-                conn.commit()
-                row = conn.execute(
-                    "SELECT * FROM watches WHERE id = ?", (cursor.lastrowid,)
-                ).fetchone()
-
             return self._row_to_entry(row)
         finally:
             conn.close()
@@ -700,6 +750,7 @@ class WatchRepository:
         finally:
             conn.close()
 
+    @_retry_on_busy
     def remove_watch(self, watch_id: int) -> bool:
         """
         Deactivate a watch (soft delete — keeps history).
@@ -716,6 +767,7 @@ class WatchRepository:
         finally:
             conn.close()
 
+    @_retry_on_busy
     def update_after_check(
         self,
         watch_id: int,

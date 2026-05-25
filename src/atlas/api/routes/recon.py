@@ -355,8 +355,6 @@ async def investigate(
 
     # Step 2: Run recon tools concurrently
     # urlscan needs the full URL; others work on the domain
-    recon_tasks: dict[str, asyncio.Task] = {}
-
     tool_targets = {
         "dns": (domain, {}),
         "whois": (domain, {}),
