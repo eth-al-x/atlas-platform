@@ -667,6 +667,8 @@ function cytoscapeStyles() {
       style: { 'line-color': '#a78bfa',          'width': 3 } },
     { selector: 'edge[kind = "slash24"]',
       style: { 'line-color': C('--text-2'),      'line-style': 'dotted' } },
+    { selector: 'edge[kind = "jarm"]',
+      style: { 'line-color': '#f59e0b',          'width': 3 } },
 
     // ── Selection styling ────────────────────────────────
     {

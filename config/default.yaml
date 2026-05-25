@@ -61,3 +61,11 @@ censys:
   # Free tier: 250 queries/month. 5 pages × 100 results = up to 500 certs.
   max_pages: 5
   # Credentials: set CENSYS_API_ID and CENSYS_API_SECRET in .env
+
+jarm:
+  # JARM TLS fingerprinting target port.
+  # 443 is HTTPS; could be set to 465 (SMTPS), 993 (IMAPS), etc.
+  port: 443
+  # Per-handshake timeout in seconds. Total scan time worst case is
+  # roughly this × 5 because the 10 handshakes run with concurrency=2.
+  timeout_seconds: 10

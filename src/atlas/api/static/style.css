@@ -1187,6 +1187,7 @@ body::before {
 .legend__swatch[data-kind="registrar"] { background: var(--accent-dim); }
 .legend__swatch[data-kind="favicon"]   { background: #a78bfa;            height: 3px; }
 .legend__swatch[data-kind="slash24"]   { background: var(--text-2);      border-top: 1px dotted var(--text-2); height: 0; }
+.legend__swatch[data-kind="jarm"]      { background: #f59e0b;            height: 3px; }
 
 /* ── Detail panel (shown when a node/edge is tapped) ─────── */
 

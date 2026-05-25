@@ -62,6 +62,27 @@ def extract_favicon_hash(recon: dict[str, ReconResult]) -> int | None:
     return h if isinstance(h, int) else None
 
 
+def extract_jarm(recon: dict[str, ReconResult]) -> str | None:
+    """
+    Pull the JARM TLS fingerprint out of jarm recon data.
+
+    Returns None if jarm didn't run, the scan errored, the host had no
+    TLS (jarm_hash stored as None by the recon tool), or if the stored
+    value is the all-zeros sentinel for any reason. Matching on the
+    all-zeros sentinel would cluster every TLS-less host together, which
+    is meaningless.
+    """
+    jarm = recon.get("jarm")
+    if not jarm or jarm.error:
+        return None
+    h = jarm.data.get("jarm_hash")
+    if not isinstance(h, str) or not h:
+        return None
+    if h == "0" * 62:  # the no-TLS sentinel, defensive check
+        return None
+    return h
+
+
 def slash24_prefix(ip: str | None) -> str | None:
     """
     Reduce an IPv4 address to its /24 prefix string (e.g. '1.2.3').
@@ -88,7 +109,7 @@ def extract_all(recon: dict[str, ReconResult]) -> dict:
     """
     Extract every pivot attribute in one call.
 
-    Returns a dict with keys ip, asn, registrar, favicon_hash, slash24.
+    Returns a dict with keys ip, asn, registrar, favicon_hash, slash24, jarm.
     Any field that couldn't be extracted is None.
     """
     ip = extract_ip(recon)
@@ -98,4 +119,5 @@ def extract_all(recon: dict[str, ReconResult]) -> dict:
         "registrar": extract_registrar(recon),
         "favicon_hash": extract_favicon_hash(recon),
         "slash24": slash24_prefix(ip),
+        "jarm": extract_jarm(recon),
     }

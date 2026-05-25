@@ -60,6 +60,15 @@ class CensysConfig(BaseModel):
     # Credentials are read from CENSYS_API_ID / CENSYS_API_SECRET in .env
 
 
+class JarmConfig(BaseModel):
+    # Target port — JARM hashes are port-specific; 443 is the default for
+    # HTTPS services. Could be overridden for SMTPS, IMAPS, etc.
+    port: int = 443
+    # Per-handshake timeout in seconds. Total scan time is bounded by
+    # this × (10 packets / concurrency) ≈ this × 5 in the worst case.
+    timeout_seconds: int = 10
+
+
 class AtlasConfig(BaseModel):
     analysis: AnalysisConfig = AnalysisConfig()
     blocklist: BlocklistConfig = BlocklistConfig()
@@ -68,6 +77,7 @@ class AtlasConfig(BaseModel):
     server: ServerConfig = ServerConfig()
     greynoise: GreyNoiseConfig = GreyNoiseConfig()
     censys: CensysConfig = CensysConfig()
+    jarm: JarmConfig = JarmConfig()
 
 
 def load_config(config_path: Path | None = None) -> AtlasConfig:

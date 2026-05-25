@@ -352,6 +352,7 @@ def _print_recon_result(result, title: str) -> None:
         "subdomains": _render_subdomains,
         "greynoise": _render_greynoise,
         "censys_certs": _render_censys_certs,
+        "jarm": _render_jarm,
     }
     renderer = renderers.get(result.recon_type)
     if renderer:
@@ -1037,6 +1038,60 @@ def recon_censys(
     _print_recon_result(result, "Censys Certificates")
 
 
+def _render_jarm(result) -> None:
+    """Render JARM TLS fingerprint result."""
+    data = result.data
+
+    host = data.get("host", "—")
+    port = data.get("port", 443)
+    tls_available = data.get("tls_available", False)
+    jarm_hash = data.get("jarm_hash")
+
+    console.print(f"[bold]Target:[/bold]       {host}:{port}")
+
+    if not tls_available:
+        # Either no TLS, library missing, or scan errored — note explains
+        note = data.get("note", "JARM scan unavailable")
+        console.print(f"[bold]TLS:[/bold]          [yellow]not available[/yellow]")
+        console.print(f"[dim]{note}[/dim]")
+        return
+
+    console.print(f"[bold]TLS:[/bold]          [green]available[/green]")
+    console.print(f"[bold]JARM hash:[/bold]    [cyan]{jarm_hash}[/cyan]")
+    console.print(
+        "\n[dim]ℹ  JARM clusters hosts running identical TLS stacks. Same JARM = "
+        "same library, version, and configuration. Useful for finding related "
+        "infrastructure; not a verdict signal on its own.[/dim]"
+    )
+
+
+@recon_app.command("jarm")
+def recon_jarm(
+    domain: str = typer.Argument(..., help="Domain to fingerprint (e.g. example.com)"),
+) -> None:
+    """
+    Compute the JARM TLS fingerprint for a host.
+
+    Sends 10 specially crafted TLS Client Hello packets and hashes the
+    server's responses into a 62-character fingerprint. Two hosts with
+    the same JARM run identical TLS stacks — strong signal for campaign
+    attribution where attackers redeploy the same server image across
+    rotating domains.
+    """
+    logging.basicConfig(level=logging.WARNING)
+    # The jarm library is verbose at DEBUG/INFO — quiet it
+    for noisy in ("jarm", "asyncio"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    from atlas.core.domain import extract_domain
+    from atlas.recon.jarm import JarmReconTool
+
+    clean = extract_domain(domain) if "/" in domain else domain.lower().strip()
+    tool = JarmReconTool(get_config())
+    result = tool.run(clean)
+    _print_recon_result(result, "JARM TLS Fingerprint")
+
+
 # ── Renderers for WHOIS and IP Intel ──────────────────────────
 
 
@@ -1307,6 +1362,7 @@ def investigate(
     from atlas.recon.whois_lookup import WhoisReconTool
     from atlas.recon.greynoise import GreyNoiseReconTool
     from atlas.recon.censys_certs import CensysCertsReconTool
+    from atlas.recon.jarm import JarmReconTool
 
     config = get_config()
     clean_domain = extract_domain(target) if "/" in target else target.lower().strip()
@@ -1376,6 +1432,8 @@ def investigate(
          "Certificate Transparency (crt.sh)", False),
         ("━━━ Censys Certificates ━━━", CensysCertsReconTool(config), clean_domain,
          "Censys Certificates", False),
+        ("━━━ JARM TLS Fingerprint ━━━", JarmReconTool(config), clean_domain,
+         "JARM TLS Fingerprint", False),
         ("━━━ HTTP Headers ━━━", HTTPHeadersReconTool(config), full_url,
          "HTTP Headers", False),
         ("━━━ Web Content ━━━", WebReconTool(config), full_url, "Web Recon", False),
@@ -2031,6 +2089,110 @@ def pivot_favicon(
     console.print(
         f"[dim]{len(matches)} match(es). "
         f"Domains sharing a favicon often share an operator or impersonation target.[/dim]"
+    )
+
+
+@pivot_app.command("jarm")
+def pivot_jarm(
+    jarm_hash: str = typer.Argument(
+        ...,
+        help="62-character JARM TLS fingerprint hash.",
+    ),
+    output: str = typer.Option(
+        "terminal", "--output", "-o",
+        help="Output format: terminal (default), json, or csv",
+    ),
+) -> None:
+    """
+    Find every prior scan whose JARM TLS fingerprint matched this hash.
+
+    Identical JARMs mean identical TLS stacks: same library, same version,
+    same cipher/extension configuration. Useful for campaign attribution
+    where attackers redeploy the same server image across rotating domains.
+    Common defaults (stock nginx, cloudflare origin) share JARMs with
+    millions of hosts — interpret matches alongside verdicts, not in
+    isolation.
+    """
+    from atlas.core.export import OUTPUT_FORMATS
+    import csv as _csv, io as _io
+
+    if output not in OUTPUT_FORMATS:
+        console.print(f"[red]Invalid --output: {output!r}. Use: {', '.join(OUTPUT_FORMATS)}[/red]")
+        raise typer.Exit(2)
+
+    # Validate hash format before touching the DB
+    if len(jarm_hash) != 62 or not all(c in "0123456789abcdef" for c in jarm_hash.lower()):
+        console.print(
+            f"[red]Invalid JARM hash. Expected 62 hex characters; got {len(jarm_hash)}.[/red]"
+        )
+        raise typer.Exit(2)
+    if jarm_hash == "0" * 62:
+        console.print(
+            "[red]Cannot pivot on the all-zeros sentinel (means 'no TLS available').[/red]"
+        )
+        raise typer.Exit(2)
+
+    repo = _get_repo()
+    related = repo.find_related_scans(
+        exclude_scan_id=-1,  # don't exclude anything — caller didn't scan
+        jarm_hash=jarm_hash,
+    )
+    matches = related.get("jarm", [])
+
+    if output == "json":
+        typer.echo(json.dumps(
+            {"jarm_hash": jarm_hash, "matches": matches},
+            indent=2, default=str,
+        ))
+        return
+
+    if output == "csv":
+        columns = ("scan_id", "domain", "url", "verdict", "scanned_at")
+        buf = _io.StringIO()
+        writer = _csv.DictWriter(buf, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        for m in matches:
+            writer.writerow(m)
+        typer.echo(buf.getvalue(), nl=False)
+        return
+
+    # ── Terminal output ───────────────────────────────────────
+    if not matches:
+        # Show first 10 chars for readability — the full hash is in the user's terminal history
+        console.print(
+            f"[dim]No scans found with JARM hash[/dim] [bold]{jarm_hash[:10]}…[/bold]"
+        )
+        return
+
+    from atlas.core.models import Verdict
+    table = Table(
+        title=f"Scans sharing JARM [bold cyan]{jarm_hash[:10]}…[/bold cyan]",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Scan ID", justify="right", min_width=8)
+    table.add_column("Domain", min_width=24)
+    table.add_column("URL", min_width=32)
+    table.add_column("Verdict", min_width=12)
+    table.add_column("Scanned At", min_width=20)
+
+    for m in matches:
+        verdict_enum = next(
+            (v for v in Verdict if v.value == m["verdict"]),
+            Verdict.CLEAN,
+        )
+        _, color = _verdict_style(verdict_enum)
+        table.add_row(
+            str(m["scan_id"]),
+            m["domain"],
+            (m.get("url") or "")[:60],
+            f"[{color}]{m['verdict']}[/{color}]",
+            (m.get("scanned_at") or "")[:19],
+        )
+    console.print(table)
+    console.print(
+        f"[dim]{len(matches)} match(es). "
+        f"Same JARM = same TLS stack and configuration — strong attribution signal.[/dim]"
     )
 
 

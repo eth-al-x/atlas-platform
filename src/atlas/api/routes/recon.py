@@ -59,6 +59,7 @@ def _make_recon_tools(config: AtlasConfig) -> dict:
     from atlas.recon.ip_neighborhood import IPNeighborhoodReconTool
     from atlas.recon.greynoise import GreyNoiseReconTool
     from atlas.recon.censys_certs import CensysCertsReconTool
+    from atlas.recon.jarm import JarmReconTool
 
     return {
         "dns": DNSReconTool(config),
@@ -73,6 +74,7 @@ def _make_recon_tools(config: AtlasConfig) -> dict:
         "ip_neighborhood": IPNeighborhoodReconTool(config),
         "greynoise": GreyNoiseReconTool(config),
         "censys_certs": CensysCertsReconTool(config),
+        "jarm": JarmReconTool(config),
     }
 
 
@@ -294,6 +296,30 @@ async def recon_censys(
     return ReconResponse(result=result)
 
 
+@router.get(
+    "/jarm/{domain}",
+    response_model=ReconResponse,
+    summary="JARM TLS fingerprint",
+    description=(
+        "Compute the JARM TLS fingerprint for the host by sending 10 "
+        "specially crafted TLS Client Hello packets and hashing the "
+        "server's responses.\n\n"
+        "Two hosts with the same JARM run an identical TLS stack — "
+        "useful for campaign attribution where operators redeploy the "
+        "same server image across rotating domains. JARM is a clustering "
+        "signal, not a verdict signal: many benign defaults share JARMs.\n\n"
+        "Returns the all-zeros sentinel internally for hosts with no TLS; "
+        "the recon tool surfaces that as `tls_available: false`."
+    ),
+)
+async def recon_jarm(
+    domain: str,
+    tools: dict = Depends(get_tools),
+) -> ReconResponse:
+    result = await _run_tool(tools["jarm"], domain)
+    return ReconResponse(result=result)
+
+
 
 @router.get(
     "/neighbors/{domain}",
@@ -366,6 +392,7 @@ async def investigate(
         "email_recon": (domain, {}),
         "ip_neighborhood": (domain, {}),
         "greynoise": (domain, {}),
+        "jarm": (domain, {}),
     }
 
     if not body.skip_slow:

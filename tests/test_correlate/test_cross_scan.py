@@ -135,6 +135,48 @@ class TestFindRelatedScans:
         assert len(related["registrar"]) == 1
         assert related["registrar"][0]["domain"] == "evil2.com"
 
+    def test_same_jarm_match(self, db_repo):
+        """JARM pivot finds scans sharing a TLS fingerprint."""
+        # Populate scans, then add JARM data: A and B share a hash, C has its own.
+        ids = _populate_three_scans(db_repo)
+        shared_hash = "ab" * 31
+        other_hash = "cd" * 31
+        for sid in (ids["A"], ids["B"]):
+            db_repo.save_recon_results(sid, {
+                "jarm": ReconResult(
+                    recon_type="jarm",
+                    domain="x",
+                    data={"jarm_hash": shared_hash, "tls_available": True},
+                ),
+            })
+        db_repo.save_recon_results(ids["C"], {
+            "jarm": ReconResult(
+                recon_type="jarm",
+                domain="x",
+                data={"jarm_hash": other_hash, "tls_available": True},
+            ),
+        })
+
+        related = db_repo.find_related_scans(
+            exclude_scan_id=ids["A"], jarm_hash=shared_hash,
+        )
+        assert len(related["jarm"]) == 1
+        assert related["jarm"][0]["domain"] == "evil2.com"
+
+    def test_jarm_pivot_returns_empty_when_no_match(self, db_repo):
+        ids = _populate_three_scans(db_repo)
+        db_repo.save_recon_results(ids["A"], {
+            "jarm": ReconResult(
+                recon_type="jarm",
+                domain="x",
+                data={"jarm_hash": "ab" * 31, "tls_available": True},
+            ),
+        })
+        related = db_repo.find_related_scans(
+            exclude_scan_id=ids["A"], jarm_hash="ff" * 31,
+        )
+        assert related["jarm"] == []
+
     def test_excludes_current_scan(self, db_repo):
         """The exclude_scan_id must not appear in any result list."""
         ids = _populate_three_scans(db_repo)
@@ -150,7 +192,10 @@ class TestFindRelatedScans:
     def test_no_pivots_no_results(self, db_repo):
         _populate_three_scans(db_repo)
         related = db_repo.find_related_scans(exclude_scan_id=999)
-        assert related == {"ip": [], "asn": [], "registrar": [], "favicon": [], "slash24": []}
+        assert related == {
+            "ip": [], "asn": [], "registrar": [],
+            "favicon": [], "slash24": [], "jarm": [],
+        }
 
     def test_no_matches_returns_empty_lists(self, db_repo):
         _populate_three_scans(db_repo)

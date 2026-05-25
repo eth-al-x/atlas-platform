@@ -39,7 +39,7 @@ router = APIRouter(prefix="/graph", tags=["Graph"])
 
 # Categories the cross-scan correlator emits and we render as edges.
 # Order matters for stable JSON output; the frontend doesn't care.
-_PIVOT_CATEGORIES = ("ip", "asn", "registrar", "favicon", "slash24")
+_PIVOT_CATEGORIES = ("ip", "asn", "registrar", "favicon", "slash24", "jarm")
 
 
 @router.get(
@@ -135,6 +135,7 @@ def _build_graph(
                 registrar=pivots["registrar"],
                 favicon_hash=pivots["favicon_hash"],
                 slash24=pivots["slash24"],
+                jarm_hash=pivots["jarm"],
                 limit_per_category=limit_per_pivot,
             )
 
@@ -245,4 +246,10 @@ def _pivot_display_value(category: str, pivots: dict[str, Any]) -> str:
     if category == "slash24":
         prefix = pivots.get("slash24")
         return f"{prefix}.0/24" if prefix else ""
+    if category == "jarm":
+        # JARM hashes are 62 chars — too wide for an edge label. Show
+        # the first 10 chars with an ellipsis; the full hash is still
+        # accessible via the detail panel tooltip.
+        h = pivots.get("jarm")
+        return f"{h[:10]}…" if h else ""
     return ""

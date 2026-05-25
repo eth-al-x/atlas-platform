@@ -277,6 +277,7 @@ class ScanRepository:
         registrar: str | None = None,
         favicon_hash: int | None = None,
         slash24: str | None = None,
+        jarm_hash: str | None = None,
         limit_per_category: int = 10,
     ) -> dict[str, list[dict]]:
         """
@@ -286,13 +287,14 @@ class ScanRepository:
         JSON without needing a normalized schema. Each match category returns
         up to `limit_per_category` results, ordered by recency.
 
-        Pivot categories: ip, asn, registrar, favicon, slash24
+        Pivot categories: ip, asn, registrar, favicon, slash24, jarm
         The slash24 pivot uses SQLite GLOB to find IPs in the same /24 range
         without needing CIDR-aware indexing. The exact-IP pivot is still
         run separately so we can show both kinds of relationships clearly.
         """
         related: dict[str, list[dict]] = {
-            "ip": [], "asn": [], "registrar": [], "favicon": [], "slash24": [],
+            "ip": [], "asn": [], "registrar": [],
+            "favicon": [], "slash24": [], "jarm": [],
         }
         conn = self._conn()
         try:
@@ -346,6 +348,18 @@ class ScanRepository:
                     glob_pattern=f"{slash24}.*",
                     exclude_scan_id=exclude_scan_id,
                     exclude_value=exclude_ip,
+                    limit=limit_per_category,
+                )
+            if jarm_hash:
+                # JARM hashes are 62-char strings; equality match works.
+                # The "no TLS" sentinel (all zeros) should never reach here —
+                # the recon tool sets jarm_hash to None for failed scans.
+                related["jarm"] = self._match_recon(
+                    conn,
+                    recon_type="jarm",
+                    json_path="$.jarm_hash",
+                    value=jarm_hash,
+                    exclude_scan_id=exclude_scan_id,
                     limit=limit_per_category,
                 )
             return related

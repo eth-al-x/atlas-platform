@@ -87,8 +87,9 @@ class CrossScanCorrelator(Correlator):
         registrar = pivot_helpers.extract_registrar(context.recon)
         favicon_hash = pivot_helpers.extract_favicon_hash(context.recon)
         slash24 = pivot_helpers.slash24_prefix(ip)
+        jarm_hash = pivot_helpers.extract_jarm(context.recon)
 
-        if not any([ip, asn, registrar, favicon_hash is not None, slash24]):
+        if not any([ip, asn, registrar, favicon_hash is not None, slash24, jarm_hash]):
             return CorrelationResult(
                 summary="No pivot attributes available for cross-scan correlation",
                 findings=[],
@@ -102,6 +103,7 @@ class CrossScanCorrelator(Correlator):
             registrar=registrar,
             favicon_hash=favicon_hash,
             slash24=slash24,
+            jarm_hash=jarm_hash,
         )
 
         findings: list[dict[str, Any]] = []
@@ -111,6 +113,7 @@ class CrossScanCorrelator(Correlator):
             ("registrar", "Same registrar", registrar),
             ("favicon", "Same favicon", favicon_hash),
             ("slash24", "Same /24", slash24),
+            ("jarm", "Same JARM", jarm_hash),
         ):
             for row in related.get(category, []):
                 findings.append({
@@ -142,6 +145,8 @@ class CrossScanCorrelator(Correlator):
                 parts.append(f"{len(related['favicon'])} sharing favicon")
             if related.get("slash24"):
                 parts.append(f"{len(related['slash24'])} in same /24")
+            if related.get("jarm"):
+                parts.append(f"{len(related['jarm'])} with same JARM")
             summary = (
                 f"{len(unique_domains)} related domain(s) found ({', '.join(parts)})"
             )
@@ -161,6 +166,7 @@ class CrossScanCorrelator(Correlator):
                     "registrar": registrar,
                     "favicon_hash": favicon_hash,
                     "slash24": slash24,
+                    "jarm": jarm_hash,
                 },
             },
         )

@@ -163,6 +163,48 @@ class TestSlash24:
         assert pivots.slash24_prefix(ip) is None
 
 
+# ── extract_jarm ──────────────────────────────────────────────
+
+
+class TestExtractJarm:
+
+    def _jarm_recon(self, **data) -> dict:
+        from atlas.core.models import ReconResult
+        return {"jarm": ReconResult(recon_type="jarm", domain="x", data=data)}
+
+    def test_extracts_valid_jarm(self):
+        recon = self._jarm_recon(jarm_hash="ab" * 31)
+        assert pivots.extract_jarm(recon) == "ab" * 31
+
+    def test_returns_none_when_jarm_missing(self):
+        assert pivots.extract_jarm({}) is None
+
+    def test_returns_none_when_jarm_errored(self):
+        from atlas.core.models import ReconResult
+        recon = {"jarm": ReconResult(
+            recon_type="jarm", domain="x", data={}, error="boom",
+        )}
+        assert pivots.extract_jarm(recon) is None
+
+    def test_returns_none_when_jarm_hash_is_none(self):
+        """The recon tool sets jarm_hash=None when TLS unavailable."""
+        recon = self._jarm_recon(jarm_hash=None, tls_available=False)
+        assert pivots.extract_jarm(recon) is None
+
+    def test_returns_none_for_all_zeros_sentinel(self):
+        """Defensive check — should never pivot on the no-TLS sentinel."""
+        recon = self._jarm_recon(jarm_hash="0" * 62)
+        assert pivots.extract_jarm(recon) is None
+
+    def test_returns_none_for_non_string(self):
+        recon = self._jarm_recon(jarm_hash=12345)
+        assert pivots.extract_jarm(recon) is None
+
+    def test_returns_none_for_empty_string(self):
+        recon = self._jarm_recon(jarm_hash="")
+        assert pivots.extract_jarm(recon) is None
+
+
 # ── extract_all ───────────────────────────────────────────────
 
 
@@ -177,6 +219,14 @@ class TestExtractAll:
             whois={"registrar": "Example"},
             web_recon={"favicon": {"mmh3_hash": 42}},
         )
+        # Inject a JARM result the same way the recon dict builder doesn't
+        # support yet — direct construction
+        from atlas.core.models import ReconResult
+        recon["jarm"] = ReconResult(
+            recon_type="jarm",
+            domain="x",
+            data={"jarm_hash": "ab" * 31},
+        )
         result = pivots.extract_all(recon)
         assert result == {
             "ip": "1.2.3.4",
@@ -184,6 +234,7 @@ class TestExtractAll:
             "registrar": "Example",
             "favicon_hash": 42,
             "slash24": "1.2.3",
+            "jarm": "ab" * 31,
         }
 
     def test_returns_all_none_for_empty_recon(self):

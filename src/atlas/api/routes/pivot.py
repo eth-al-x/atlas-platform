@@ -66,6 +66,60 @@ async def pivot_favicon(
 
 
 @router.get(
+    "/jarm/{jarm_hash}",
+    summary="Find scans sharing a JARM TLS fingerprint",
+    description=(
+        "Given a 62-character JARM hash, return every prior scan whose "
+        "TLS server fingerprint matched the same value.\n\n"
+        "Identical JARMs mean identical TLS stacks — same library, same "
+        "version, same cipher/extension configuration. Useful for "
+        "campaign attribution: phishing kits deployed from the same "
+        "template share JARM hashes across domains and IPs.\n\n"
+        "Note: many benign defaults (stock nginx, stock cloudflare "
+        "origin) share JARMs with millions of hosts. JARM is a "
+        "clustering signal, not a verdict signal."
+    ),
+)
+async def pivot_jarm(
+    jarm_hash: str,
+    limit: int = Query(default=50, ge=1, le=200),
+    repo: ScanRepository = Depends(get_repo),
+) -> dict:
+    # Defensive validation — a JARM hash is exactly 62 hex characters.
+    # Reject obvious garbage before round-tripping through the DB.
+    if len(jarm_hash) != 62 or not all(c in "0123456789abcdef" for c in jarm_hash.lower()):
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid JARM hash (expected 62 hex chars, got {len(jarm_hash)})",
+        )
+
+    # The all-zeros sentinel is the JARM library's "no TLS available"
+    # response. We never want to pivot on it — it would match every
+    # dead host in the database.
+    if jarm_hash == "0" * 62:
+        raise HTTPException(
+            status_code=400,
+            detail="cannot pivot on the all-zeros JARM (no-TLS sentinel)",
+        )
+
+    loop = asyncio.get_event_loop()
+    related = await loop.run_in_executor(
+        None,
+        partial(
+            repo.find_related_scans,
+            exclude_scan_id=-1,            # no scan to exclude — direct pivot
+            jarm_hash=jarm_hash,
+            limit_per_category=limit,
+        ),
+    )
+    matches = related.get("jarm", [])
+    return {
+        "jarm_hash": jarm_hash,
+        "match_count": len(matches),
+        "matches": matches,
+    }
+
+@router.get(
     "/subnet",
     summary="Find scans with IPs in a subnet",
     description=(
