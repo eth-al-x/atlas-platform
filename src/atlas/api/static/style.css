@@ -1025,3 +1025,199 @@ body::before {
 
 /* Selection */
 ::selection { background: var(--accent-line); color: var(--text-0); }
+
+/* ───────────────────────────────────────────────────────────
+ * Graph view
+ *
+ * Cytoscape.js renders into #cy. The surrounding chrome (depth
+ * selector, layout buttons, legend, detail panel) follows the
+ * same tactical-monospace aesthetic as the rest of the console.
+ * ─────────────────────────────────────────────────────────── */
+
+/* "view as graph" link in panel headers */
+.panel__action {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--accent);
+  text-decoration: none;
+  letter-spacing: 0.04em;
+  opacity: 0.85;
+  transition: opacity 0.15s ease;
+}
+.panel__action:hover { opacity: 1; }
+
+/* ── Control bar ─────────────────────────────────────────── */
+
+.graph-controls {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 12px var(--pad);
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 16px;
+}
+
+.graph-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.graph-control__label {
+  font-size: 11px;
+  color: var(--text-2);
+  text-transform: lowercase;
+  letter-spacing: 0.06em;
+}
+
+.graph-control__buttons {
+  display: flex;
+  gap: 2px;
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 2px;
+}
+
+.graph-btn {
+  font-family: inherit;
+  font-size: 11px;
+  background: transparent;
+  color: var(--text-1);
+  border: none;
+  padding: 4px 10px;
+  cursor: pointer;
+  border-radius: var(--radius);
+  transition: all 0.15s ease;
+  letter-spacing: 0.04em;
+}
+
+.graph-btn:hover {
+  background: var(--bg-2);
+  color: var(--text-0);
+}
+
+.graph-btn.is-active {
+  background: var(--accent-glow);
+  color: var(--accent);
+}
+
+.graph-stats {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-2);
+  letter-spacing: 0.04em;
+}
+
+/* ── Stage (canvas + legend) ─────────────────────────────── */
+
+.graph-stage {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 180px;
+  gap: 12px;
+  height: 65vh;
+  min-height: 480px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  margin-bottom: 16px;
+}
+
+.graph-stage.is-loading {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.cy-canvas {
+  width: 100%;
+  height: 100%;
+  background:
+    radial-gradient(ellipse at center, rgba(93, 212, 207, 0.025), transparent 60%),
+    var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+/* ── Legend ──────────────────────────────────────────────── */
+
+.graph-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 11px;
+}
+
+.legend__title {
+  color: var(--text-2);
+  text-transform: lowercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 4px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.legend__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-1);
+}
+
+.legend__swatch {
+  display: inline-block;
+  width: 22px;
+  height: 2px;
+  flex-shrink: 0;
+}
+.legend__swatch[data-kind="ip"]        { background: var(--accent);     height: 3px; }
+.legend__swatch[data-kind="asn"]       { background: var(--text-2);     border-top: 1px dashed var(--text-2); height: 0; }
+.legend__swatch[data-kind="registrar"] { background: var(--accent-dim); }
+.legend__swatch[data-kind="favicon"]   { background: #a78bfa;            height: 3px; }
+.legend__swatch[data-kind="slash24"]   { background: var(--text-2);      border-top: 1px dotted var(--text-2); height: 0; }
+
+/* ── Detail panel (shown when a node/edge is tapped) ─────── */
+
+.graph-detail {
+  margin-top: 0;
+}
+
+.detail-row {
+  display: grid;
+  grid-template-columns: 100px 1fr;
+  gap: 12px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+  align-items: center;
+}
+.detail-row:last-child { border-bottom: none; }
+
+.detail-row__k {
+  color: var(--text-2);
+  font-size: 11px;
+  text-transform: lowercase;
+  letter-spacing: 0.06em;
+}
+
+.detail-row__v {
+  color: var(--text-0);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+/* ── Responsive: collapse legend below canvas on narrow screens ── */
+@media (max-width: 900px) {
+  .graph-stage {
+    grid-template-columns: 1fr;
+    height: auto;
+  }
+  .cy-canvas { height: 50vh; min-height: 400px; }
+}

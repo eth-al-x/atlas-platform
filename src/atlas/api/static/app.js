@@ -32,6 +32,9 @@ const api = {
   async runWatches(changedOnly=false) {
                             return post(`${API}/watches/run`, { changed_only: changedOnly });
                           },
+  async scanGraph(id, depth=1) {
+                            return get(`${API}/graph/scan/${id}?depth=${depth}`);
+                          },
 };
 
 async function get(url) {
@@ -131,6 +134,13 @@ async function navigate() {
   if (route === 'scans' && params.length === 1) {
     setActiveNav('scans');
     await renderScanDetail(params[0]);
+    return;
+  }
+
+  // Graph view: #graph/123
+  if (route === 'graph' && params.length === 1) {
+    setActiveNav('scans');
+    await renderScanGraph(params[0]);
     return;
   }
 
@@ -387,6 +397,18 @@ function renderCrossScan(corr) {
   if (!corr.findings?.length) return;
   const panel = viewEl.querySelector('#cross-scan-panel');
   panel.hidden = false;
+
+  // Wire the "view as graph" link to this scan's id. The link is in the
+  // panel header from the scan-detail template; we read the scan id off
+  // the page header which renderScanDetail set up.
+  const idText = viewEl.querySelector('[data-field="id"]')?.textContent || '';
+  const match = idText.match(/(\d+)/);
+  const scanId = match ? match[1] : null;
+  const graphLink = panel.querySelector('[data-field="graph-link"]');
+  if (scanId && graphLink) {
+    graphLink.setAttribute('href', `#graph/${scanId}`);
+  }
+
   panel.querySelector('#cross-scan-list').innerHTML = corr.findings.map(f => `
     <div class="related-row">
       <span class="related-row__cat">${escapeHtml(f.category)}</span>
@@ -401,6 +423,331 @@ function renderCrossScan(corr) {
       </span>
     </div>
   `).join('');
+}
+
+// ───── Graph view (Cytoscape-powered pivot graph) ─────────────
+
+// Module-level state for the graph view. Cleared on every fresh render.
+let _cy = null;
+let _currentGraphState = { scanId: null, depth: 1, layout: 'cose' };
+
+async function renderScanGraph(scanId) {
+  renderFromTemplate('tpl-graph');
+
+  _currentGraphState = { scanId, depth: 1, layout: 'cose' };
+
+  // Back link returns to the scan detail
+  viewEl.querySelector('[data-action="back-to-scan"]')?.addEventListener('click', () => {
+    window.location.hash = `#scans/${scanId}`;
+  });
+
+  // Wire depth selector
+  viewEl.querySelectorAll('#graph-depth .graph-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const d = parseInt(btn.dataset.depth, 10);
+      if (d === _currentGraphState.depth) return;
+      _currentGraphState.depth = d;
+      viewEl.querySelectorAll('#graph-depth .graph-btn').forEach(b =>
+        b.classList.toggle('is-active', b === btn));
+      loadGraph();
+    });
+  });
+
+  // Wire layout selector
+  viewEl.querySelectorAll('#graph-layout .graph-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const layout = btn.dataset.layout;
+      if (layout === _currentGraphState.layout) return;
+      _currentGraphState.layout = layout;
+      viewEl.querySelectorAll('#graph-layout .graph-btn').forEach(b =>
+        b.classList.toggle('is-active', b === btn));
+      applyLayout(layout);
+    });
+  });
+
+  await loadGraph();
+}
+
+async function loadGraph() {
+  const { scanId, depth, layout } = _currentGraphState;
+  const stage = viewEl.querySelector('.graph-stage');
+  const stats = viewEl.querySelector('#graph-stats');
+
+  // Visible loading hint while the request is in flight
+  stats.textContent = 'loading…';
+  stage?.classList.add('is-loading');
+
+  // Fail fast if Cytoscape didn't load (offline / CDN blocked)
+  if (typeof cytoscape !== 'function') {
+    stage.innerHTML = errorBlock(new Error(
+      'Cytoscape failed to load. Check your network connection — the graph view ' +
+      'requires loading cytoscape.min.js from a CDN.'
+    ));
+    return;
+  }
+
+  try {
+    const data = await api.scanGraph(scanId, depth);
+
+    // Update header from the root node
+    const root = data.nodes.find(n => n.type === 'root');
+    if (root) {
+      viewEl.querySelector('[data-field="root-domain"]').textContent = root.domain;
+      viewEl.querySelector('[data-field="root-id"]').textContent = `scan id ${root.scan_id}`;
+    }
+
+    // Stats line
+    const s = data.stats;
+    let statsText = `${s.node_count} nodes · ${s.edge_count} edges · depth ${s.depth_reached}`;
+    if (s.truncated) statsText += ' · truncated';
+    stats.textContent = statsText;
+
+    renderCytoscape(data, layout);
+  } catch (err) {
+    stage.innerHTML = errorBlock(err);
+    stats.textContent = 'error';
+  } finally {
+    stage?.classList.remove('is-loading');
+  }
+}
+
+function renderCytoscape(data, layoutName) {
+  // Tear down any prior instance — cy.destroy() releases canvas + listeners
+  if (_cy) {
+    _cy.destroy();
+    _cy = null;
+  }
+
+  const container = viewEl.querySelector('#cy');
+  if (!container) return;
+
+  const elements = [
+    ...data.nodes.map(n => ({
+      data: {
+        id: n.id,
+        scan_id: n.scan_id,
+        domain: n.domain,
+        verdict: n.verdict,
+        scanned_at: n.scanned_at,
+        type: n.type,
+        // verdictBand used by Cytoscape's per-class color rules
+        verdictBand: verdictBand(n.verdict),
+      },
+    })),
+    ...data.edges.map((e, i) => ({
+      data: {
+        id: `e${i}`,
+        source: e.source,
+        target: e.target,
+        kind: e.kind,
+        value: e.value,
+      },
+    })),
+  ];
+
+  _cy = cytoscape({
+    container,
+    elements,
+    style: cytoscapeStyles(),
+    layout: cytoscapeLayout(layoutName),
+    wheelSensitivity: 0.2,
+    minZoom: 0.3,
+    maxZoom: 2.5,
+  });
+
+  // Node tap: open details panel
+  _cy.on('tap', 'node', evt => {
+    showNodeDetail(evt.target.data());
+  });
+
+  // Edge tap: also show details
+  _cy.on('tap', 'edge', evt => {
+    showEdgeDetail(evt.target.data());
+  });
+
+  // Double-tap a non-root node → navigate to that scan's detail page
+  _cy.on('dbltap', 'node', evt => {
+    const sid = evt.target.data('scan_id');
+    if (sid) window.location.hash = `#scans/${sid}`;
+  });
+
+  // Tap on background: clear detail panel
+  _cy.on('tap', evt => {
+    if (evt.target === _cy) {
+      const detail = viewEl.querySelector('#graph-detail');
+      if (detail) detail.hidden = true;
+    }
+  });
+}
+
+function verdictBand(verdict) {
+  // Map the verdict string to a CSS class suffix matching the existing palette
+  if (!verdict) return 'unknown';
+  const v = verdict.toLowerCase();
+  if (v.includes('high'))   return 'high';
+  if (v.includes('medium')) return 'medium';
+  if (v.includes('low'))    return 'low';
+  if (v.includes('clean'))  return 'clean';
+  return 'unknown';
+}
+
+function cytoscapeStyles() {
+  // Pull CSS variable values once at instantiation. Cytoscape needs raw
+  // colors — it doesn't resolve var(...) on its own.
+  const css = getComputedStyle(document.documentElement);
+  const C = name => css.getPropertyValue(name).trim();
+
+  return [
+    // ── Node base ────────────────────────────────────────
+    {
+      selector: 'node',
+      style: {
+        'background-color':  C('--bg-2'),
+        'border-width':      2,
+        'border-color':      C('--border-strong'),
+        'label':             'data(domain)',
+        'color':             C('--text-0'),
+        'font-family':       "JetBrains Mono, Menlo, Consolas, monospace",
+        'font-size':         '10px',
+        'text-valign':       'bottom',
+        'text-margin-y':     6,
+        'text-background-color': C('--bg-0'),
+        'text-background-opacity': 0.7,
+        'text-background-padding': '2px',
+        'width':             28,
+        'height':            28,
+      },
+    },
+    // ── Per-verdict node fill ────────────────────────────
+    { selector: 'node[verdictBand = "high"]',
+      style: { 'background-color': C('--v-high'),  'border-color': C('--v-high')  } },
+    { selector: 'node[verdictBand = "medium"]',
+      style: { 'background-color': C('--v-medium'), 'border-color': C('--v-medium') } },
+    { selector: 'node[verdictBand = "low"]',
+      style: { 'background-color': C('--v-low'),    'border-color': C('--v-low')    } },
+    { selector: 'node[verdictBand = "clean"]',
+      style: { 'background-color': C('--v-clean'),  'border-color': C('--v-clean')  } },
+
+    // ── Root node — diamond, larger ──────────────────────
+    {
+      selector: 'node[type = "root"]',
+      style: {
+        'shape':         'diamond',
+        'width':         44,
+        'height':        44,
+        'border-width':  3,
+        'border-color':  C('--accent'),
+        'font-weight':   'bold',
+        'font-size':     '11px',
+      },
+    },
+
+    // ── Edge base ────────────────────────────────────────
+    {
+      selector: 'edge',
+      style: {
+        'width':                2,
+        'curve-style':          'bezier',
+        'line-color':           C('--accent-dim'),
+        'target-arrow-shape':   'none',
+        'opacity':              0.7,
+      },
+    },
+    // ── Per-kind edge colors ─────────────────────────────
+    { selector: 'edge[kind = "ip"]',
+      style: { 'line-color': C('--accent'),      'width': 3 } },
+    { selector: 'edge[kind = "asn"]',
+      style: { 'line-color': C('--text-2'),      'line-style': 'dashed' } },
+    { selector: 'edge[kind = "registrar"]',
+      style: { 'line-color': C('--accent-dim') } },
+    { selector: 'edge[kind = "favicon"]',
+      style: { 'line-color': '#a78bfa',          'width': 3 } },
+    { selector: 'edge[kind = "slash24"]',
+      style: { 'line-color': C('--text-2'),      'line-style': 'dotted' } },
+
+    // ── Selection styling ────────────────────────────────
+    {
+      selector: ':selected',
+      style: { 'border-width': 4, 'border-color': C('--accent') },
+    },
+  ];
+}
+
+function cytoscapeLayout(name) {
+  // Layout choices kept small intentionally — each is good for a specific
+  // graph shape, and we let the user pick rather than auto-detect.
+  if (name === 'breadthfirst') {
+    return {
+      name: 'breadthfirst',
+      directed: false,
+      padding: 30,
+      spacingFactor: 1.4,
+      animate: true,
+      animationDuration: 400,
+      roots: '[type = "root"]',
+    };
+  }
+  if (name === 'concentric') {
+    return {
+      name: 'concentric',
+      padding: 30,
+      minNodeSpacing: 30,
+      animate: true,
+      animationDuration: 400,
+      // Root at center, related nodes outward
+      concentric: node => node.data('type') === 'root' ? 2 : 1,
+      levelWidth: () => 1,
+    };
+  }
+  // Default: organic force-directed
+  return {
+    name: 'cose',
+    padding: 30,
+    animate: 'end',
+    animationDuration: 400,
+    nodeRepulsion: () => 8000,
+    idealEdgeLength: () => 80,
+    edgeElasticity: () => 100,
+    gravity: 0.5,
+  };
+}
+
+function applyLayout(name) {
+  if (!_cy) return;
+  _cy.layout(cytoscapeLayout(name)).run();
+}
+
+function showNodeDetail(node) {
+  const panel = viewEl.querySelector('#graph-detail');
+  const title = viewEl.querySelector('[data-field="detail-title"]');
+  const body = viewEl.querySelector('#graph-detail-body');
+  if (!panel || !title || !body) return;
+  panel.hidden = false;
+  title.textContent = `node: ${node.domain || node.id}`;
+  body.innerHTML = `
+    <div class="detail-row"><span class="detail-row__k">scan id</span><span class="detail-row__v">${escapeHtml(String(node.scan_id))}</span></div>
+    <div class="detail-row"><span class="detail-row__k">domain</span><span class="detail-row__v">${escapeHtml(node.domain || '—')}</span></div>
+    <div class="detail-row"><span class="detail-row__k">verdict</span><span class="detail-row__v">${pill(node.verdict)}</span></div>
+    <div class="detail-row"><span class="detail-row__k">scanned</span><span class="detail-row__v">${fmtRelative(node.scanned_at)}</span></div>
+    <div class="detail-row"><span class="detail-row__k">type</span><span class="detail-row__v">${escapeHtml(node.type || 'related')}</span></div>
+    <div class="detail-row" style="margin-top: 12px;">
+      <a class="docs-link" href="#scans/${node.scan_id}">open scan detail →</a>
+    </div>
+  `;
+}
+
+function showEdgeDetail(edge) {
+  const panel = viewEl.querySelector('#graph-detail');
+  const title = viewEl.querySelector('[data-field="detail-title"]');
+  const body = viewEl.querySelector('#graph-detail-body');
+  if (!panel || !title || !body) return;
+  panel.hidden = false;
+  title.textContent = `edge: ${edge.kind}`;
+  body.innerHTML = `
+    <div class="detail-row"><span class="detail-row__k">kind</span><span class="detail-row__v">${escapeHtml(edge.kind)}</span></div>
+    <div class="detail-row"><span class="detail-row__k">value</span><span class="detail-row__v">${escapeHtml(edge.value || '—')}</span></div>
+    <div class="detail-row"><span class="detail-row__k">connects</span><span class="detail-row__v">${escapeHtml(edge.source)} ↔ ${escapeHtml(edge.target)}</span></div>
+  `;
 }
 
 function renderRecon(reconData) {

@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
+<script src="https://unpkg.com/cytoscape@3.30.0/dist/cytoscape.min.js"></script>
 </head>
 <body>
 
@@ -223,6 +224,9 @@
     <section class="panel" id="cross-scan-panel" hidden>
       <header class="panel__head">
         <span class="bracket">[</span>related infrastructure<span class="bracket">]</span>
+        <a class="panel__action" data-field="graph-link" href="#" title="open as graph">
+          view as graph →
+        </a>
       </header>
       <div class="panel__body">
         <div id="cross-scan-list" class="data-list"></div>
@@ -238,6 +242,59 @@
         <pre id="recon-pre" class="recon-pre">—</pre>
       </div>
     </section>
+  </section>
+</template>
+
+<template id="tpl-graph">
+  <header class="page-header">
+    <button class="back-link" data-action="back-to-scan">← back to scan</button>
+    <div class="page-header__title">
+      <span class="bracket">[</span>infrastructure graph<span class="bracket">]</span>
+    </div>
+    <div class="page-header__sub">
+      pivots from <span data-field="root-domain">—</span>
+      ·
+      <span class="mono-id" data-field="root-id">scan id —</span>
+    </div>
+  </header>
+
+  <section class="graph-controls">
+    <div class="graph-control">
+      <span class="graph-control__label">depth</span>
+      <div class="graph-control__buttons" id="graph-depth">
+        <button class="graph-btn is-active" data-depth="1">1</button>
+        <button class="graph-btn" data-depth="2">2</button>
+        <button class="graph-btn" data-depth="3">3</button>
+      </div>
+    </div>
+    <div class="graph-control">
+      <span class="graph-control__label">layout</span>
+      <div class="graph-control__buttons" id="graph-layout">
+        <button class="graph-btn is-active" data-layout="cose">organic</button>
+        <button class="graph-btn" data-layout="breadthfirst">tree</button>
+        <button class="graph-btn" data-layout="concentric">concentric</button>
+      </div>
+    </div>
+    <div class="graph-stats" id="graph-stats">—</div>
+  </section>
+
+  <section class="graph-stage">
+    <div id="cy" class="cy-canvas"></div>
+    <aside class="graph-legend" aria-label="Edge legend">
+      <div class="legend__title">edge kinds</div>
+      <div class="legend__row"><span class="legend__swatch" data-kind="ip"></span>shared ip</div>
+      <div class="legend__row"><span class="legend__swatch" data-kind="asn"></span>same asn</div>
+      <div class="legend__row"><span class="legend__swatch" data-kind="registrar"></span>same registrar</div>
+      <div class="legend__row"><span class="legend__swatch" data-kind="favicon"></span>same favicon</div>
+      <div class="legend__row"><span class="legend__swatch" data-kind="slash24"></span>same /24</div>
+    </aside>
+  </section>
+
+  <section class="graph-detail panel" id="graph-detail" hidden>
+    <header class="panel__head">
+      <span class="bracket">[</span><span data-field="detail-title">node</span><span class="bracket">]</span>
+    </header>
+    <div class="panel__body" id="graph-detail-body">—</div>
   </section>
 </template>
 
